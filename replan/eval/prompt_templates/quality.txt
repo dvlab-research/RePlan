@@ -1,0 +1,32 @@
+You are an expert in digital image forensics and quality assessment.
+
+You will be given a single digital image.
+
+## Objective:
+Your task is to evaluate the overall perceptual quality and authenticity of the image. You must carefully inspect it for any visual artifacts, inconsistencies, or other signs of digital manipulation.
+
+## Evaluation Scale (1 to 5):
+You will assign a **quality_score** with the following rules:
+- **5 Excellent Quality**: The image appears authentic and is free of any discernible artifacts or inconsistencies. It looks like a high-quality, original photograph.
+- **4 Minor Issues**: The image is high-quality overall, but contains very subtle artifacts or inconsistencies (e.g., slight lighting mismatch, unnatural textures, soft edges) that might suggest digital manipulation upon close inspection.
+- **3 Noticeable Artifacts**: The image has clear visual flaws or inconsistencies (e.g., distorted textures, illogical shadows, visible seams) that are immediately noticeable and point to digital editing.
+- **2 Structural Degradation**: The image contains significant structural errors (e.g., warped shapes, impossible anatomy) or jarring inconsistencies that make it look unnatural.
+- **1 Severe Errors**: The image is structurally broken, contains major hallucinations, or has such obvious and poorly executed edits that its artificial nature is undeniable.
+
+## Guidance:
+Check the following visual aspects and mark them as ✔ (satisfactory) or ✘ (problematic):
+-   **Structural Coherence**: Are all objects in the image plausible and structurally sound? (e.g., correct anatomy, realistic shapes)
+-   **Local Consistency**: Are there any localized areas that look out of place with their immediate surroundings in terms of texture, resolution, or noise patterns?
+-   **Global Consistency (Lighting & Shadow)**: Is the lighting and shadow consistent across the entire scene?
+-   **Boundary Artifacts**: Are there any visible seams, edges, or color shifts that suggest parts of the image have been pasted or blended together?
+-   **Overall Artifacts**: Are there any other distracting artifacts elsewhere in the image?
+
+## Input
+**Edited Image**:
+
+## Output Format:
+After evaluation, provide your score and concise reasoning using the following JSON format:
+{{
+"reasoning": "Structural Coherence: [✔/✘], Local Consistency: [✔/✘], Global Consistency: [✔/✘], Boundary Artifacts: [✔/✘]. [Brief explanation of any issues found].",
+"quality_score": X
+}}

@@ -1,0 +1,11 @@
+model_id: "timbrooks/instruct-pix2pix"
+
+
+output_dir: "./output/instructpix2pix"
+
+seed: 42
+allow_tf32: True
+torch_dtype: "bfloat16"
+image_guidance_scale: 1.5
+guidance_scale: 7.5
+num_inference_steps: 20

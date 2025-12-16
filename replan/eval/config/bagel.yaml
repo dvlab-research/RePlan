@@ -1,0 +1,23 @@
+# Bagel 模型评估配置
+model_id: "ByteDance-Seed/BAGEL-7B-MoT" #
+
+
+output_dir: "./output/bagel"
+
+# --- 通用设置 ---
+seed: 42
+allow_tf32: False
+torch_dtype: "bfloat16" # 可以是 "bfloat16" 或 "float32"
+
+# --- Bagel 模型特有生成参数 ---
+cfg_text_scale: 3.0
+cfg_img_scale: 1.5
+num_timesteps: 50
+think: False # 是否启用思维链 (think) 模式
+cfg_interval:
+  - 0.4
+  - 1.0
+
+# --- 分布式运行参数 (通常由 eval_bagel.sh 脚本覆盖) ---
+# rank_id: 0
+# world: 1

@@ -1,0 +1,14 @@
+flux_model_name: "black-forest-labs/FLUX.1-Kontext-dev"
+
+
+# base config
+seed: 42
+output_dir: "./output/kontext"
+
+# FLUX扩散配置
+num_inference_steps: 28
+guidance_scale: 2.5  # 从你的代码中看到使用2.5
+
+
+
+

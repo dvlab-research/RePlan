@@ -1,0 +1,13 @@
+qwen_model_name: "Qwen/Qwen-Image-Edit"
+
+
+torch_dtype: "bfloat16"  # 或者 "float16", "float32"
+
+# 基础配置
+seed: 42
+output_dir: "./output/qwen_image"
+
+# Qwen扩散配置
+true_cfg_scale: 4.0
+num_inference_steps: 50
+negative_prompt: " " 

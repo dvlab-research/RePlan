@@ -1,0 +1,21 @@
+
+vlm_ckpt_path: 'TainU/RePlan-Qwen2.5-VL-7B'
+diffusion_model_name: "Qwen/Qwen-Image-Edit"
+pipeline_type: "qwen"
+# device config
+device: "cuda"
+torch_dtype: "bfloat16"  # "float16", "float32"
+
+# base config
+seed: 42
+output_dir: "./output/replan_qwen"
+vlm_prompt_template_path: "replan.txt"
+
+
+
+# region edit config
+delete_main_prompt: False
+replace_global_prompt: False
+custom_global_prompt_text: "keep remaining parts of this image unchanged"
+expand_value: 0.15
+expand_mode: 'ratio'  # 'ratio' 或 'pixels'
