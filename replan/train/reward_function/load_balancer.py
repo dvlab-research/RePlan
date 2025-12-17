@@ -25,12 +25,10 @@ LOAD_BALANCER_PORT = int(os.getenv("PORT", "8001"))
 
 app = FastAPI()
 
-# 追踪每个 worker 的活动连接数
+# track active connections for each worker
 worker_stats: Dict[str, int] = {url: 0 for url in WORKER_URLS}
-# 用于保护 worker_stats 读写的异步锁
 lock = asyncio.Lock()
 
-# 用于请求 Worker 服务的 aiohttp session
 client_session: aiohttp.ClientSession
 
 @app.on_event("startup")
@@ -45,9 +43,6 @@ async def shutdown_event():
     await client_session.close()
 
 async def forward_request(request: Request, target_url: str):
-    """
-    将收到的请求转发到目标 URL，并流式传输响应。
-    """
     data = await request.body()
     headers = {key: value for key, value in request.headers.items() if key.lower() not in ['host']}
 
@@ -57,13 +52,10 @@ async def forward_request(request: Request, target_url: str):
             url=target_url,
             data=data,
             headers=headers,
-            timeout=aiohttp.ClientTimeout(total=300) # 5分钟超时
+            timeout=aiohttp.ClientTimeout(total=300) 
         ) as response:
-            # 读取 worker 返回的完整响应体
             response_body = await response.read()
             
-            # 将完整的响应体作为常规响应返回，而不是流式响应
-            # 这可以避免因连接意外关闭导致的流式传输错误
             return Response(
                 content=response_body,
                 status_code=response.status,
@@ -79,27 +71,27 @@ async def forward_request(request: Request, target_url: str):
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"])
 async def reverse_proxy(request: Request, path: str):
     """
-    反向代理主入口。
-    使用 "最少连接" 策略选择 worker 并转发请求。
+    reverse proxy main entry.
+    use "least connections" strategy to select worker and forward request.
     """
     selected_worker_url = None
     
-    # --- 核心逻辑: 选择最空闲的 Worker ---
+    # --- core logic: select the least busy worker ---
     async with lock:
-        # 找到活动连接数最少的 worker
+        # find the worker with the least active connections
         selected_worker_url = min(worker_stats, key=worker_stats.get)
-        # 为选中的 worker 增加连接计数
+        # increase the connection count for the selected worker
         worker_stats[selected_worker_url] += 1
         active_connections = worker_stats[selected_worker_url]
     
     logger.info(f"Proxy {request.method} /{path} -> {selected_worker_url} (active={active_connections})")
 
     try:
-        # 构建完整的 Worker 服务 URL
+        # build the complete worker service URL
         target_url = f"{selected_worker_url}/{path}"
         return await forward_request(request, target_url)
     finally:
-        # --- 核心逻辑: 请求结束后减少连接计数 ---
+        # --- core logic: decrease the connection count after the request ---
         if selected_worker_url:
             async with lock:
                 worker_stats[selected_worker_url] -= 1
@@ -109,7 +101,7 @@ async def reverse_proxy(request: Request, path: str):
 
 @app.get("/health")
 async def health():
-    """Simple health endpoint for the load balancer itself."""
+    """Simple health endpoint for the load balancer."""
     async with lock:
         stats = dict(worker_stats)
     return {

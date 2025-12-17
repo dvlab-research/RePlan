@@ -211,3 +211,4 @@ gemini_api.json
 **/wandb/
 **/test/
 api_config_res.yaml
+reason_gen_coco/

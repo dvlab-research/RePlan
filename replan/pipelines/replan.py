@@ -594,11 +594,20 @@ class RePlanPipeline:
             pipe_kwargs["guidance_scale"] = pipeline_kwargs.get("guidance_scale", 2.5)
             pipe_kwargs["height"] = pipeline_kwargs.get("height", height)
             pipe_kwargs["width"] = pipeline_kwargs.get("width", width)
+            pipe_kwargs["num_inference_steps"] = pipeline_kwargs.get("num_inference_steps", 28)
+            
         elif self.pipeline_type == "qwen":
             pipe_kwargs["negative_prompt"] = pipeline_kwargs.get("negative_prompt", " ")
             pipe_kwargs["generator"] = torch.manual_seed(0)
             pipe_kwargs["true_cfg_scale"] = pipeline_kwargs.get("true_cfg_scale", 4.0)
             pipe_kwargs["num_inference_steps"] = pipeline_kwargs.get("num_inference_steps", 50)
+
+        # Pass callback parameters if present
+        if "callback_on_step_end" in pipeline_kwargs:
+            pipe_kwargs["callback_on_step_end"] = pipeline_kwargs["callback_on_step_end"]
+        if "callback_on_step_end_tensor_inputs" in pipeline_kwargs:
+            pipe_kwargs["callback_on_step_end_tensor_inputs"] = pipeline_kwargs["callback_on_step_end_tensor_inputs"]
+
 
         edited_image = self.diffusion_pipe(**pipe_kwargs).images[0]
 

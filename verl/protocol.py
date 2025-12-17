@@ -88,11 +88,31 @@ def union_tensor_dict(tensor_dict1: TensorDict, tensor_dict2: TensorDict) -> Ten
             f"Two tensor dict must have identical batch size. Got {tensor_dict1.batch_size} and {tensor_dict2.batch_size}"
         )
 
+    # NOTE:
+    # `TensorDict.__getitem__` often returns a (locked) view (e.g., SubTensorDict).
+    # In recent tensordict versions, locked tensordicts disallow `__setitem__`.
+    # Here we defensively materialize a writable copy when needed.
+    try:
+        is_locked_attr = getattr(tensor_dict1, "is_locked", None)
+        is_locked = is_locked_attr() if callable(is_locked_attr) else bool(is_locked_attr)
+    except Exception:
+        is_locked = False
+
+    if is_locked:
+        # clone() materializes a regular TensorDict in most tensordict versions.
+        # This keeps semantics (union returns a tensordict with both key sets) while
+        # avoiding in-place mutation on a locked view.
+        tensor_dict1 = tensor_dict1.clone()
+
     for key in tensor_dict2.keys():
         if key in tensor_dict1 and not torch.equal(tensor_dict1[key], tensor_dict2[key]):
             raise ValueError(f"Key already exists: {key}.")
-
-        tensor_dict1[key] = tensor_dict2[key]
+        # Prefer set_ (in-place update) when the key already exists; this is also
+        # the only allowed mutation mode for locked tensordicts.
+        if key in tensor_dict1 and hasattr(tensor_dict1, "set_"):
+            tensor_dict1.set_(key, tensor_dict2[key])
+        else:
+            tensor_dict1[key] = tensor_dict2[key]
 
     return tensor_dict1
 
@@ -201,12 +221,13 @@ class DataProto:
         return DataProtoItem(batch=tensor_data, non_tensor_batch=non_tensor_data, meta_info=self.meta_info)
 
     def __getstate__(self) -> Tuple[bytes, Dict[str, NDArray], Dict[str, Any]]:
+        if self.batch is not None:            
+            batch_to_save: TensorDict = self.batch.contiguous()
+            batch_to_save: TensorDict = batch_to_save.consolidate()
+        else:   
+            batch_to_save = None
         buffer = io.BytesIO()
-        if self.batch is not None:
-            self.batch: TensorDict = self.batch.contiguous()
-            self.batch: TensorDict = self.batch.consolidate()
-
-        torch.save(self.batch, buffer)
+        torch.save(batch_to_save, buffer)
         buffer_bytes = buffer.getvalue()
         return buffer_bytes, self.non_tensor_batch, self.meta_info
 
@@ -393,6 +414,20 @@ class DataProto:
             index = index.detach().cpu().numpy()
 
         tensor_data = self.batch[index] if self.batch is not None else None
+        # Materialize selection to avoid returning a locked view (SubTensorDict),
+        # which would later break any `__setitem__` (e.g. via `union`).
+        if tensor_data is not None:
+            try:
+                tensor_data = tensor_data.contiguous().consolidate()
+            except Exception:
+                pass
+            try:
+                is_locked_attr = getattr(tensor_data, "is_locked", None)
+                is_locked = is_locked_attr() if callable(is_locked_attr) else bool(is_locked_attr)
+            except Exception:
+                is_locked = False
+            if is_locked:
+                tensor_data = tensor_data.clone()
         non_tensor_data = {key: value[index] for key, value in self.non_tensor_batch.items()}
         return DataProto(batch=tensor_data, non_tensor_batch=non_tensor_data, meta_info=self.meta_info)
 
@@ -411,6 +446,19 @@ class DataProto:
         """
         index = slice(start, end, step)
         tensor_data = self.batch[index] if self.batch is not None else None
+        # Same as index_select(): slicing can return a locked view.
+        if tensor_data is not None:
+            try:
+                tensor_data = tensor_data.contiguous().consolidate()
+            except Exception:
+                pass
+            try:
+                is_locked_attr = getattr(tensor_data, "is_locked", None)
+                is_locked = is_locked_attr() if callable(is_locked_attr) else bool(is_locked_attr)
+            except Exception:
+                is_locked = False
+            if is_locked:
+                tensor_data = tensor_data.clone()
         non_tensor_data = {key: value[index] for key, value in self.non_tensor_batch.items()}
         return DataProto(batch=tensor_data, non_tensor_batch=non_tensor_data, meta_info=self.meta_info)
 
@@ -600,7 +648,26 @@ class DataProto:
         Note that this operation is in-place
         """
         indices_np = indices.detach().numpy()
-        self.batch = self.batch[indices]
+        # Indexing a TensorDict typically returns a view (SubTensorDict). In newer
+        # tensordict versions these views are locked and disallow adding new keys
+        # via `__setitem__`, which later breaks `DataProto.union(...)`.
+        # Materialize to a writable TensorDict after reordering.
+        if self.batch is not None:
+            selected = self.batch[indices]
+            # Try to preserve contiguity and consolidate nested storages.
+            try:
+                selected = selected.contiguous().consolidate()
+            except Exception:
+                pass
+            # If the result is still locked, clone to materialize.
+            try:
+                is_locked_attr = getattr(selected, "is_locked", None)
+                is_locked = is_locked_attr() if callable(is_locked_attr) else bool(is_locked_attr)
+            except Exception:
+                is_locked = False
+            if is_locked:
+                selected = selected.clone()
+            self.batch = selected
         self.non_tensor_batch = {key: value[indices_np] for key, value in self.non_tensor_batch.items()}
 
     def repeat(self, repeat_times: int, interleave: bool = True) -> "DataProto":

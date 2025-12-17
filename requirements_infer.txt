@@ -1,7 +1,7 @@
 accelerate
 datasets
 torch>=2.5.0
-transformers<4.54.0
+transformers==4.52.4
 diffusers>=0.36.0.dev0
 qwen_vl_utils==0.0.14
 einops
@@ -14,7 +14,6 @@ Pillow
 PyYAML
 Requests
 safetensors
-torch_xla
 tqdm
 wandb
 peft

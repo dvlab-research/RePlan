@@ -115,7 +115,6 @@ async def load_model():
             device = "cpu"
 
         pipeline = RegionEditService(device=device)
-        # pipeline.start() 是一个阻塞操作，在线程中运行以避免阻塞事件循环
         await asyncio.to_thread(pipeline.start)
         
         app.state.pipeline = pipeline
@@ -134,7 +133,6 @@ async def startup():
     app.state.model_ready = False
     app.state.model_load_failed = False
     logger.info("Server started. Model is NOT ready yet; it will be loaded asynchronously in background.")
-    # 在后台启动模型加载任务
     logger.info("Scheduling background model load task ...")
     asyncio.create_task(load_model())
 
@@ -234,11 +232,9 @@ async def generate_image(edit_input: RegionEditInput):
 
                 return {"final_image_base64": img_str}
 
-            # 使用 asyncio.to_thread 来运行阻塞的同步函数，这是更现代和安全的方式
             logger.info("Request accepted: running image generation in a worker thread ...")
             results = await asyncio.to_thread(edit_fn)
             logger.info("Request completed: image generation finished.")
-            # 确保结果是 JSON 可序列化的，特别是处理字典中的元组键
             json_compatible_results = jsonable_encoder(results)
             return {"data": [json_compatible_results]}
     except Exception as e:

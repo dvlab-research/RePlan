@@ -1,40 +1,40 @@
 #!/bin/bash
 
-# 检查是否提供了配置文件参数
+# check if the configuration file parameter is provided
 if [ -z "$1" ]; then
-    echo "错误：未提供配置文件。"
-    echo "用法: $0 <config_file.yaml>"
+    echo "Error: configuration file not provided."
+    echo "Usage: $0 <config_file.yaml>"
     exit 1
 fi
 
 CONFIG_FILE=$1
 
-# 1. 获取可用的GPU数量
+# get the number of available GPUs
 NUM_GPUS=$(nvidia-smi -L | wc -l)
 
-# 定义一个数组来存储所有后台进程的PID
+# define an array to store all background process PIDs
 pids=()
 
-# 定义一个清理函数，用于终止所有后台进程
+# define a cleanup function to terminate all background processes
 cleanup() {
-    echo "正在终止所有后台进程..."
-    # 杀死所有记录的PID
+    echo "Terminating all background processes..."
+    # kill all recorded PIDs
     kill ${pids[@]} 2>/dev/null
     wait
 }
 
-# 设置trap，当脚本收到EXIT, SIGINT, 或 SIGTERM信号时，执行cleanup函数
+# set trap, when the script receives EXIT, SIGINT, or SIGTERM signal, execute cleanup function
 trap cleanup EXIT SIGINT SIGTERM
 
-# 3. 循环启动进程
+# loop to start processes
 for ((i=0; i<NUM_GPUS; i++))
 do
-    echo "启动进程 RANK=$i, 使用 GPU $i"
+    echo "Starting process RANK=$i, using GPU $i"
     CUDA_VISIBLE_DEVICES=$i python -m replan.eval.gen_samples_kontext_rephrase $CONFIG_FILE --rank_id $i --world $NUM_GPUS &
     pids+=($!)
 done
 
-# 4. 等待所有后台进程执行完毕
+# wait for all background processes to finish
 wait
 
-echo "所有进程已执行完毕。"
+echo "All processes have been executed."
