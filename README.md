@@ -143,8 +143,12 @@ python replan/inference/app.py --server_port 8080 --pipeline_type "flux"
 #### 📺 Demo Video
 
 <div align="center">
-<video src="assets/demo.mp4" width="80%" controls></video>
+<video src="https://github.com/user-attachments/assets/22f73ee5-2f5a-4c4b-9bad-3a2544d844d6" width="80%" controls></video>
 </div>
+
+
+
+
 
 #### 📝 How to Use
 
