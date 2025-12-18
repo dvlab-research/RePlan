@@ -4,6 +4,7 @@ import sys
 import json
 import base64
 import threading
+import re  # <--- 确保引用 re
 from io import BytesIO
 from pathlib import Path
 from datetime import datetime
@@ -88,9 +89,17 @@ FULL_PAGE_TEMPLATE = r"""
         .workspace { display: flex; flex: 1; overflow: hidden; gap: 10px; padding: 10px; }
         .col { background: white; border: 1px solid #e5e7eb; border-radius: 8px; display: flex; flex-direction: column; padding: 15px; gap: 10px; overflow-y: auto; }
         
+        /* === Modified Column Layout === */
         .col-left { width: 300px; flex-shrink: 0; }
-        .col-center { flex: 1; min-width: 0; padding: 0 !important; border: none; background: transparent; overflow: hidden; }
-        .col-right { width: 350px; flex-shrink: 0; }
+        .col-center { flex: 1.5; min-width: 0; padding: 0 !important; border: none; background: transparent; overflow: hidden; }
+        
+        /* Right is flexible (flex 1) but has min/max constraints */
+        .col-right { 
+            flex: 1; 
+            min-width: 350px; 
+            max-width: 600px; 
+            flex-shrink: 0; 
+        }
         
         .label { font-size: 11px; font-weight: 700; color: #6b7280; text-transform: uppercase; margin-bottom: 4px; display: block; }
         
@@ -100,8 +109,9 @@ FULL_PAGE_TEMPLATE = r"""
         .btn-primary { background: #4f46e5; }
         .btn-success { background: #10b981; }
         
+        .panel-input { width: 100%; border: 1px solid #d1d5db; border-radius: 6px; padding: 8px; font-size: 13px; margin-bottom: 8px; font-family: inherit; box-sizing: border-box; }
         .input-box { width: 100%; padding: 8px; border: 1px solid #d1d5db; border-radius: 6px; resize: vertical; box-sizing: border-box; font-family: inherit; }
-        .input-box:focus { outline: none; border-color: #4f46e5; }
+        .input-box:focus, .panel-input:focus { outline: none; border-color: #4f46e5; }
 
         input[type=range] { -webkit-appearance: none; width: 100%; background: transparent; }
         input[type=range]:focus { outline: none; }
@@ -112,11 +122,22 @@ FULL_PAGE_TEMPLATE = r"""
         .upload-area:hover { border-color: #4f46e5; background: #eff6ff; }
         .preview-img { max-width: 100%; max-height: 150px; margin-top: 10px; display: none; border-radius: 4px; object-fit: contain; margin: 10px auto 0 auto; }
         
-        .result-container { flex: 1; background: #1f2937; border-radius: 6px; display: flex; align-items: center; justify-content: center; position: relative; min-height: 200px; overflow: hidden; }
+        /* === Modified Result Container === */
+        .result-container { 
+            flex: 1; 
+            background: #1f2937; 
+            border-radius: 6px; 
+            display: flex; 
+            align-items: center; 
+            justify-content: center; 
+            position: relative; 
+            min-height: 400px; 
+            overflow: hidden; 
+        }
+        
         .result-img { max-width: 100%; max-height: 100%; object-fit: contain; display: none; }
         .loading-overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.6); color: white; display: none; align-items: center; justify-content: center; font-weight: bold; flex-direction: column; gap: 10px; z-index: 50; }
         
-        /* Examples List Styles */
         .ex-list { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 5px; }
         .ex-item { aspect-ratio: 1; border-radius: 6px; cursor: pointer; border: 2px solid transparent; overflow: hidden; position: relative; background: #eee; }
         .ex-item:hover { border-color: #4f46e5; }
@@ -147,7 +168,6 @@ FULL_PAGE_TEMPLATE = r"""
         .bbox { position: absolute; border: 2px solid; cursor: move; box-sizing: border-box; }
         .bbox.selected { border: 2px solid #fff !important; box-shadow: 0 0 0 1px rgba(0,0,0,0.5); z-index: 100; }
         
-        /* Updated BBox Label Styles */
         .bbox-label { 
             position: absolute; 
             top: -24px; left: -2px; 
@@ -159,7 +179,7 @@ FULL_PAGE_TEMPLATE = r"""
             max-width: 200px; 
             overflow: hidden; 
             text-overflow: ellipsis;
-            z-index: 200; /* Ensure on top */
+            z-index: 200; 
             box-shadow: 0 1px 3px rgba(0,0,0,0.3);
             line-height: 1.2;
         }
@@ -177,7 +197,6 @@ FULL_PAGE_TEMPLATE = r"""
         .color-dot { width: 12px; height: 12px; border-radius: 50%; }
         .item-label { font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         
-        .panel-input { width: 100%; border: 1px solid #d1d5db; border-radius: 4px; padding: 6px; font-size: 13px; margin-bottom: 8px; }
         .color-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 5px; }
         .color-opt { width: 20px; height: 20px; border-radius: 50%; cursor: pointer; border: 2px solid transparent; transition: transform 0.1s; }
         .color-opt:hover { transform: scale(1.1); border-color: #999; }
@@ -249,7 +268,8 @@ FULL_PAGE_TEMPLATE = r"""
                                 <span style="color:#4f46e5;">Selected Region</span>
                                 <button onclick="window.EditorApp.deleteSelected()" style="background:none; border:none; cursor:pointer; color:#ef4444;" title="Delete">[[ICON_TRASH]]</button>
                             </div>
-                            <input type="text" id="label-input" class="panel-input" placeholder="Hint Label...">
+                            <textarea id="label-input" class="panel-input" rows="4" style="resize:vertical; min-height:80px;" placeholder="Hint Label (Enter to describe)..."></textarea>
+                            
                             <div class="label">Color</div>
                             <div id="color-row" class="color-row"></div>
                         </div>
@@ -288,10 +308,10 @@ FULL_PAGE_TEMPLATE = r"""
 <script>
 // ================= Configuration =================
 const EXAMPLES = [
-    { src: "./custom_assets/cup.png", text: "Replace the cup that has been used and left on the desk with a small potted plant" },
+    { src: "./custom_assets/cup.png", text: "Replace the glass that has been used and left on the desk with a small potted plant" },
     { src: "./custom_assets/crowd.png", text: "Find the woman with light blue backpack and change the color of her shoes to red" },
     { src: "./custom_assets/festival.png", text: "The sun has now set, and someone has decorated the large bush on the right with colorful fairy lights for the evening's festivities." },
-    { src: "./custom_assets/cream.png", text: "Replace the spread on the left cracker with peanut butter and the spread on the right cracker with cream cheese." },
+    { src: "./custom_assets/cream.png", text: "Replace the spread on the left cracker with peanut butter and the spread on the right cracker with avocado cream." },
     { src: "./custom_assets/keyboard.png", text: "Change the color of the keyboard with yellow sticky notes to black." },
     { src: "./custom_assets/sunglasses.png", text: "Remove the sunglasses from the person sitting on the left." },
     { src: "./custom_assets/snowman.png", text: "Replace the individual whose attire suggests a greater emphasis on thermal insulation for cold weather with a snowman." },
@@ -391,14 +411,10 @@ window.EditorApp = {
             hint: b.label
         }));
         
+        // [Fixed] Removed automatic fallback to instruction.
+        // We only get what is currently in the global prompt input.
         let globalPrompt = this.dom.globalInput ? this.dom.globalInput.value : "";
         
-        // Fallback: if global prompt is empty in editor, try to take from main instruction
-        if (!globalPrompt || globalPrompt.trim() === "") {
-             const instr = document.getElementById('instruction').value;
-             if (instr) globalPrompt = instr;
-        }
-
         return `<gen_image>${globalPrompt}</gen_image><region>${JSON.stringify(regionData)}</region>`;
     },
 
@@ -750,10 +766,18 @@ window.App = {
     runEdit: async function() {
         if (!window.EditorApp) return;
         
-        // Ensure we have instruction or global prompt
-        const instr = document.getElementById('instruction').value;
-        const xml = window.EditorApp.getData(); // Now automatically falls back to instr if global prompt is empty
+        // [修复] 增加对 Global Prompt 的非空校验
+        const globalPromptEl = document.getElementById('global-prompt');
+        if (!globalPromptEl || !globalPromptEl.value.trim()) {
+            alert("⚠️ Global Prompt cannot be empty. Please enter a description.");
+            return;
+        }
+
+        const xml = window.EditorApp.getData(); 
         const steps = document.getElementById('steps-input').value;
+
+        // [修复] 在此函数作用域内定义 instr
+        const instr = document.getElementById('instruction').value || ""; 
         
         this.setLoading(true);
         this.resetProgress();
@@ -763,7 +787,7 @@ window.App = {
 
         const fd = new FormData();
         fd.append('image', this.currentFile);
-        fd.append('instruction', instr);
+        fd.append('instruction', instr); // 此时 instr 已定义
         fd.append('xml', xml);
         fd.append('num_inference_steps', steps);
         fd.append('run_id', runId);
@@ -871,25 +895,20 @@ def main():
     os.makedirs(output_base_dir, exist_ok=True)
     print(f"Project Root: {project_root}")
 
-    pipeline = MockPipeline()
-    # if pipeline is None:
-    #     try:
-    #         print(f"Initializing RePlanPipeline ({args.pipeline_type})...")
-    #         pipeline = RePlanPipeline(
-    #             vlm_ckpt_path=args.vlm_ckpt_path,
-    #             diffusion_model_name=args.diffusion_model_name,
-    #             pipeline_type=args.pipeline_type,
-    #             output_dir=output_base_dir,
-    #             device=args.device,
-    #             torch_dtype=_parse_torch_dtype(args.dtype),
-    #             vlm_prompt_template_path=args.vlm_prompt_template_path,
-    #             lora_path=args.lora_path,
-    #             init_vlm=True,
-    #             image_dir=project_root,
-    #         )
-    #     except Exception as e:
-    #         print(f"Init Failed: {e}")
-    #         pipeline = MockPipeline()
+    if pipeline is None:
+        print(f"Initializing RePlanPipeline ({args.pipeline_type})...")
+        pipeline = RePlanPipeline(
+            vlm_ckpt_path=args.vlm_ckpt_path,
+            diffusion_model_name=args.diffusion_model_name,
+            pipeline_type=args.pipeline_type,
+            output_dir=output_base_dir,
+            device=args.device,
+            torch_dtype=_parse_torch_dtype(args.dtype),
+            vlm_prompt_template_path=args.vlm_prompt_template_path,
+            lora_path=args.lora_path,
+            init_vlm=True,
+            image_dir=project_root,
+        )
 
     theme = gr.themes.Default(
         font=["ui-sans-serif", "system-ui", "sans-serif"],
@@ -979,18 +998,24 @@ def main():
                     with open(temp_path, "wb") as f:
                         f.write(content)
                     
-                    print(f"[API Edit] Processing with prompt: {instruction}, Steps: {num_inference_steps}")
+                    # --- NEW LOGIC START ---
                     
-                    # Even if XML has no boxes, as long as it has <gen_image> prompt, pipeline should handle it.
+                    # 1. Parse XML to extract Global Prompt for printing
+                    global_prompt_match = re.search(r'<gen_image>(.*?)</gen_image>', xml, re.DOTALL)
+                    global_prompt = global_prompt_match.group(1).strip() if global_prompt_match else "N/A"
+                    
+                    # 2. Count regions for info
+                    region_count = xml.count('bbox_2d')
+
+                    # 3. Updated Print Statement
+                    print(f"[API Edit] Processing | Global: '{global_prompt}' | Regions: {region_count} | Steps: {num_inference_steps}")
+                    
                     res = pipeline.region_edit_with_attention(
                         image=temp_path,
-                        instruction=instruction,
-                        response=xml,
+                        instruction="",
+                        response=xml,   # <--- Model uses this for prompt & regions
                         output_dir=final_dir,
-                        delete_main_prompt=False,
-                        replace_global_prompt=False,
-                        custom_global_prompt_text="keep remaining parts unchanged",
-                        expand_value=0.15,
+                        expand_value=0.2,
                         expand_mode="ratio",
                         bboxes_attend_to_each_other=True,
                         symmetric_masking=False,

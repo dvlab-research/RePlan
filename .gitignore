@@ -212,3 +212,5 @@ gemini_api.json
 **/test/
 api_config_res.yaml
 reason_gen_coco/
+hf_model_readme.md
+hf_data_readme.md
