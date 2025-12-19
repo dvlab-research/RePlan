@@ -52,7 +52,7 @@
   - [Prerequisites](#prerequisites)
   - [Stage 1: Format and Reasoning Learning](#stage-1-format-and-reasoning-learning)
   - [Stage 2: Planning Learning](#stage-2-planning-learning)
-- [📝 Citation](#citation)
+- [📝 Citation](#citation )
 
 ## 💡 Introduction
 
@@ -371,4 +371,13 @@ python -m replan.train.model_merger --local_dir ./ckpt/easy_r1/stage2/global_ste
 
 ```
 
+## 📝 Citation
 
+```
+@inproceedings{Qu2025RePlanRR,
+  title={RePlan: Reasoning-guided Region Planning for Complex Instruction-based Image Editing},
+  author={Tianyuan Qu and Lei Ke and Xiaohang Zhan and Longxiang Tang and Yuqi Liu and Bohao Peng and Bei Yu and Dong Yu and Jiaya Jia},
+  year={2025},
+  url={https://api.semanticscholar.org/CorpusID:283933722}
+}
+```

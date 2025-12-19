@@ -977,10 +977,6 @@ class MultiRegionFluxKontextPipeline(
         width = width // multiple_of * multiple_of
         height = height // multiple_of * multiple_of
 
-        # if height != original_height or width != original_width:
-        #     logger.warning(
-        #         f"Generation `height` and `width` have been adjusted to {height} and {width} to fit the model requirements."
-        #     )
 
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
@@ -1236,7 +1232,6 @@ class MultiRegionFluxKontextPipeline(
                 
                 if attention_mask is not None:
                     self._joint_attention_kwargs["attention_mask"] = attention_mask
-                    #self._joint_attention_kwargs["region_mask"] = attention_mask
 
                 latent_model_input = latents
                 if image_latents is not None:
@@ -1337,14 +1332,8 @@ class MultiRegionFluxKontextPipeline(
                 f" size of {batch_size}. Make sure the batch size matches the length of the generators."
             )
 
-        # VAE applies 8x compression on images but we must also account for packing which requires
-        # latent height and width to be divisible by 2.
-        # print("height1,", height)
-        # print("width1,", width)
         height = 2 * (int(height) // (self.vae_scale_factor * 2))
         width = 2 * (int(width) // (self.vae_scale_factor * 2))
-        # print("height2,", height)
-        # print("width2,", width)
         shape = (batch_size, num_channels_latents, height, width)
 
         image_latents = image_ids = None
@@ -1366,8 +1355,6 @@ class MultiRegionFluxKontextPipeline(
                 image_latents = torch.cat([image_latents], dim=0)
 
             image_latent_height, image_latent_width = image_latents.shape[2:]
-            # print("image_latent_height,", image_latent_height)
-            # print("image_latent_width,", image_latent_width)
             image_latents = self._pack_latents(
                 image_latents, batch_size, num_channels_latents, image_latent_height, image_latent_width
             )
@@ -1391,16 +1378,11 @@ class MultiRegionFluxKontextPipeline(
     @staticmethod
     # Copied from diffusers.pipelines.flux.pipeline_flux.FluxPipeline._prepare_latent_image_ids
     def _prepare_latent_image_ids(batch_size, height, width, device, dtype):
-        # print("height3,", height)
-        # print("width3,", width)
         latent_image_ids = torch.zeros(height, width, 3)
         latent_image_ids[..., 1] = latent_image_ids[..., 1] + torch.arange(height)[:, None]
         latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(width)[None, :]
 
         latent_image_id_height, latent_image_id_width, latent_image_id_channels = latent_image_ids.shape
-        # print("latent_image_id_height,", latent_image_id_height)
-        # print("latent_image_id_width,", latent_image_id_width)
-        # print("latent_image_id_channels,", latent_image_id_channels)
 
         latent_image_ids = latent_image_ids.reshape(
             latent_image_id_height * latent_image_id_width, latent_image_id_channels
