@@ -374,13 +374,11 @@ python -m replan.train.model_merger --local_dir ./ckpt/easy_r1/stage2/global_ste
 ## 📝 Citation
 
 ```
-@misc{qu2025replanreasoningguidedregionplanning,
+@article{qu2025replan,
       title={RePlan: Reasoning-guided Region Planning for Complex Instruction-based Image Editing}, 
       author={Tianyuan Qu and Lei Ke and Xiaohang Zhan and Longxiang Tang and Yuqi Liu and Bohao Peng and Bei Yu and Dong Yu and Jiaya Jia},
-      year={2025},
-      eprint={2512.16864},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2512.16864}, 
+      journal={arXiv preprint arXiv:2512.16864},
+      year={2025}
 }
+
 ```
