@@ -8,7 +8,7 @@
   <a href="https://replan-iv-edit.github.io/">
     <img src="https://img.shields.io/badge/Project%20Page-blue?style=for-the-badge&logo=homeassistant&logoColor=white" alt="Project Page">
   </a>&nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="您的arXiv链接">
+  <a href="https://arxiv.org/abs/2512.16864">
     <img src="https://img.shields.io/badge/Paper%20(arXiv)-B31B1B?style=for-the-badge&logo=arxiv&logoColor=white" alt="Paper (arXiv)">
   </a>&nbsp;&nbsp;&nbsp;&nbsp;
   <a href="https://huggingface.co/datasets/TainU/IV-Edit">
