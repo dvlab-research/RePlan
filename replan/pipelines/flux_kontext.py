@@ -179,6 +179,7 @@ def retrieve_timesteps(
     else:
         scheduler.set_timesteps(num_inference_steps, device=device, **kwargs)
         timesteps = scheduler.timesteps
+        num_inference_steps = len(timesteps)
     return timesteps, num_inference_steps
 
 
@@ -656,6 +657,154 @@ class MultiRegionFluxKontextPipeline(
     def interrupt(self):
         return self._interrupt
 
+    def _create_attention_mask(
+        self,
+        attention_rules,
+        num_patches,
+        total_text_len,
+        prompt_len,
+        hint_lens,
+        image_patch_indices_list,
+        batch_size,
+        num_images_per_prompt,
+        device,
+        mask_main_prompt_influence=False,
+        symmetric_masking=False,
+        delete_main_prompt=False,
+    ):
+        total_seq_len = total_text_len + 2 * num_patches
+        attention_mask = torch.zeros(
+            num_images_per_prompt * batch_size,
+            24, # attention heads
+            total_seq_len,
+            total_seq_len,
+            device=device,
+            dtype=torch.bool,
+        )
+
+        if attention_rules:
+            # 1. Define component indices
+            num_regions = len(image_patch_indices_list)
+            
+            # Get indices for text components
+            text_indices = {}
+            if not delete_main_prompt:
+                text_indices['Main Prompt'] = list(range(prompt_len))
+            
+            hint_start_idx = prompt_len
+            for i in range(num_regions):
+                hint_len = hint_lens[i]
+                text_indices[f'Hint {i+1}'] = list(range(hint_start_idx, hint_start_idx + hint_len))
+                hint_start_idx += hint_len
+            
+            # Get indices for image patch components
+            all_bbox_patches = set()
+            for indices in image_patch_indices_list:
+                all_bbox_patches.update(indices)
+            
+            all_patches = set(range(num_patches))
+            bg_patches = all_patches - all_bbox_patches
+
+            patch_indices = {}
+            for i, indices in enumerate(image_patch_indices_list):
+                patch_indices[f'BBox {i+1}'] = list(indices)
+            patch_indices['Background'] = list(bg_patches)
+
+            # Helper to get all indices for a component name
+            def get_indices(comp_name):
+                if comp_name in text_indices:
+                    return text_indices[comp_name]
+                
+                # Decouple Noise and Image patches
+                if 'Noise' in comp_name:
+                    base_comp_name = comp_name.replace('Noise ', '')
+                    if base_comp_name in patch_indices:
+                        return [total_text_len + i for i in patch_indices[base_comp_name]]
+                elif 'Image' in comp_name:
+                    base_comp_name = comp_name.replace('Image ', '')
+                    if base_comp_name in patch_indices:
+                        return [total_text_len + num_patches + i for i in patch_indices[base_comp_name]]
+                # Fallback for old component names for backward compatibility
+                elif comp_name in patch_indices:
+                    l1_indices = [total_text_len + i for i in patch_indices[comp_name]]
+                    l2_indices = [total_text_len + num_patches + i for i in patch_indices[comp_name]]
+                    return l1_indices + l2_indices
+                    
+                return []
+
+            # 2. Populate attention_mask based on rules
+            for (q_comp, k_comp), allowed in attention_rules.items():
+                if allowed:
+                    q_indices = get_indices(q_comp)
+                    k_indices = get_indices(k_comp)
+                    if q_indices and k_indices:
+                        # Create index tensors on the correct device
+                        q_indices_tensor = torch.tensor(q_indices, device=device, dtype=torch.long)
+                        k_indices_tensor = torch.tensor(k_indices, device=device, dtype=torch.long)
+                        # Use advanced indexing to set the mask values
+                        attention_mask[:, :, q_indices_tensor.view(-1, 1), k_indices_tensor.view(1, -1)] = True
+            
+        else:
+            # Original attention mask logic
+            # 1. Text-to-Text attention:
+            # Main prompt attends to itself
+            attention_mask[:, :, :prompt_len, :prompt_len] = True
+            # Each hint attends to itself
+            hint_start_idx = prompt_len
+            for hint_len in hint_lens:
+                attention_mask[:, :, hint_start_idx : hint_start_idx + hint_len, hint_start_idx : hint_start_idx + hint_len] = True
+                hint_start_idx += hint_len
+
+            # 2. Image-to-Image attention: all image patches attend to each other
+            attention_mask[:, :, total_text_len:, total_text_len:] = True
+
+            # 3. Image-to-Text attention (Region Guidance)
+            if not mask_main_prompt_influence:
+                # All patches attend to the main prompt
+                attention_mask[:, :, total_text_len:, :prompt_len] = True
+
+            # Specific patch regions attend to their corresponding hints
+            hint_start_idx = prompt_len
+            for i, patch_indices in enumerate(image_patch_indices_list):
+                hint_len = hint_lens[i]
+                if patch_indices:
+                    # Apply to both latent copies
+                    for p_idx in patch_indices:
+                        # First latent copy
+                        attention_mask[:, :, total_text_len + p_idx, hint_start_idx : hint_start_idx + hint_len] = True
+                        # Second latent copy
+                        attention_mask[:, :, total_text_len + num_patches + p_idx, hint_start_idx : hint_start_idx + hint_len] = True
+                hint_start_idx += hint_len
+
+            # 4. (Optional) Symmetric Text-to-Image attention
+            if symmetric_masking:
+                # Main prompt attends to all image patches
+                if not mask_main_prompt_influence:
+                    attention_mask[:, :, :prompt_len, total_text_len:] = True
+
+                # Regional hints attend to their corresponding image patches
+                hint_start_idx = prompt_len
+                for i, patch_indices in enumerate(image_patch_indices_list):
+                    hint_len = hint_lens[i]
+                    if patch_indices:
+                        for p_idx in patch_indices:
+                            # First latent copy
+                            attention_mask[:, :, hint_start_idx : hint_start_idx + hint_len, total_text_len + p_idx] = True
+                            # Second latent copy
+                            attention_mask[:, :, hint_start_idx : hint_start_idx + hint_len, total_text_len + num_patches + p_idx] = True
+                    hint_start_idx += hint_len
+            else:
+                # Main prompt attends to all image patches
+                if not mask_main_prompt_influence:
+                    attention_mask[:, :, :prompt_len, total_text_len:] = True
+                
+                # All Regional hints attend to ALL image patches
+                # hints range: [prompt_len : total_text_len]
+                # image patches range: [total_text_len : end]
+                attention_mask[:, :, prompt_len:total_text_len, total_text_len:] = True
+
+        return attention_mask
+
     def process_region_guidance(
         self,
         prompt_embeds: torch.FloatTensor,
@@ -775,137 +924,20 @@ class MultiRegionFluxKontextPipeline(
             return final_prompt_embeds, final_text_ids, None, prompt_len, hint_lens, image_patch_indices_list, num_patches
 
         # New self-attention mask logic for [prompt, latents, latents] sequence
-        total_seq_len = total_text_len + 2 * num_patches
-        attention_mask = torch.zeros(
-            num_images_per_prompt * batch_size,
-            24, # attention heads
-            total_seq_len,
-            total_seq_len,
-            device=device,
-            dtype=torch.bool,
+        attention_mask = self._create_attention_mask(
+            attention_rules,
+            num_patches,
+            total_text_len,
+            prompt_len,
+            hint_lens,
+            image_patch_indices_list,
+            batch_size,
+            num_images_per_prompt,
+            device,
+            mask_main_prompt_influence,
+            symmetric_masking,
+            delete_main_prompt,
         )
-
-        if attention_rules:
-            # 1. Define component indices
-            num_regions = len(region_guidance)
-            
-            # Get indices for text components
-            text_indices = {}
-            if not delete_main_prompt:
-                text_indices['Main Prompt'] = list(range(prompt_len))
-            
-            hint_start_idx = prompt_len
-            for i in range(num_regions):
-                hint_len = hint_lens[i]
-                text_indices[f'Hint {i+1}'] = list(range(hint_start_idx, hint_start_idx + hint_len))
-                hint_start_idx += hint_len
-            
-            # Get indices for image patch components
-            all_bbox_patches = set()
-            for indices in image_patch_indices_list:
-                all_bbox_patches.update(indices)
-            
-            all_patches = set(range(num_patches))
-            bg_patches = all_patches - all_bbox_patches
-
-            patch_indices = {}
-            for i, indices in enumerate(image_patch_indices_list):
-                patch_indices[f'BBox {i+1}'] = list(indices)
-            patch_indices['Background'] = list(bg_patches)
-
-            # Helper to get all indices for a component name
-            def get_indices(comp_name):
-                if comp_name in text_indices:
-                    return text_indices[comp_name]
-                
-                # Decouple Noise and Image patches
-                if 'Noise' in comp_name:
-                    base_comp_name = comp_name.replace('Noise ', '')
-                    if base_comp_name in patch_indices:
-                        return [total_text_len + i for i in patch_indices[base_comp_name]]
-                elif 'Image' in comp_name:
-                    base_comp_name = comp_name.replace('Image ', '')
-                    if base_comp_name in patch_indices:
-                        return [total_text_len + num_patches + i for i in patch_indices[base_comp_name]]
-                # Fallback for old component names for backward compatibility
-                elif comp_name in patch_indices:
-                    l1_indices = [total_text_len + i for i in patch_indices[comp_name]]
-                    l2_indices = [total_text_len + num_patches + i for i in patch_indices[comp_name]]
-                    return l1_indices + l2_indices
-                    
-                return []
-
-            # 2. Populate attention_mask based on rules
-            for (q_comp, k_comp), allowed in attention_rules.items():
-                if allowed:
-                    q_indices = get_indices(q_comp)
-                    k_indices = get_indices(k_comp)
-                    if q_indices and k_indices:
-                        # Create index tensors on the correct device
-                        q_indices_tensor = torch.tensor(q_indices, device=device, dtype=torch.long)
-                        k_indices_tensor = torch.tensor(k_indices, device=device, dtype=torch.long)
-                        # Use advanced indexing to set the mask values
-                        attention_mask[:, :, q_indices_tensor.view(-1, 1), k_indices_tensor.view(1, -1)] = True
-            
-        else:
-            # Original attention mask logic
-            # 1. Text-to-Text attention:
-            # Main prompt attends to itself
-            attention_mask[:, :, :prompt_len, :prompt_len] = True
-            # Each hint attends to itself
-            hint_start_idx = prompt_len
-            for hint_len in hint_lens:
-                attention_mask[:, :, hint_start_idx : hint_start_idx + hint_len, hint_start_idx : hint_start_idx + hint_len] = True
-                hint_start_idx += hint_len
-
-            # 2. Image-to-Image attention: all image patches attend to each other
-            attention_mask[:, :, total_text_len:, total_text_len:] = True
-
-            # 3. Image-to-Text attention (Region Guidance)
-            if not mask_main_prompt_influence:
-                # All patches attend to the main prompt
-                attention_mask[:, :, total_text_len:, :prompt_len] = True
-
-            # Specific patch regions attend to their corresponding hints
-            hint_start_idx = prompt_len
-            for i, patch_indices in enumerate(image_patch_indices_list):
-                hint_len = hint_lens[i]
-                if patch_indices:
-                    # Apply to both latent copies
-                    for p_idx in patch_indices:
-                        # First latent copy
-                        attention_mask[:, :, total_text_len + p_idx, hint_start_idx : hint_start_idx + hint_len] = True
-                        # Second latent copy
-                        attention_mask[:, :, total_text_len + num_patches + p_idx, hint_start_idx : hint_start_idx + hint_len] = True
-                hint_start_idx += hint_len
-
-            # 4. (Optional) Symmetric Text-to-Image attention
-            if symmetric_masking:
-                # Main prompt attends to all image patches
-                if not mask_main_prompt_influence:
-                    attention_mask[:, :, :prompt_len, total_text_len:] = True
-
-                # Regional hints attend to their corresponding image patches
-                hint_start_idx = prompt_len
-                for i, patch_indices in enumerate(image_patch_indices_list):
-                    hint_len = hint_lens[i]
-                    if patch_indices:
-                        for p_idx in patch_indices:
-                            # First latent copy
-                            attention_mask[:, :, hint_start_idx : hint_start_idx + hint_len, total_text_len + p_idx] = True
-                            # Second latent copy
-                            attention_mask[:, :, hint_start_idx : hint_start_idx + hint_len, total_text_len + num_patches + p_idx] = True
-                    hint_start_idx += hint_len
-            else:
-                # Main prompt attends to all image patches
-                if not mask_main_prompt_influence:
-                    attention_mask[:, :, :prompt_len, total_text_len:] = True
-                
-                # All Regional hints attend to ALL image patches
-                # hints range: [prompt_len : total_text_len]
-                # image patches range: [total_text_len : end]
-                attention_mask[:, :, prompt_len:total_text_len, total_text_len:] = True
-
             
         return final_prompt_embeds, final_text_ids, attention_mask, prompt_len, hint_lens, image_patch_indices_list, num_patches
 
@@ -1054,9 +1086,14 @@ class MultiRegionFluxKontextPipeline(
         hint_lens = []
         image_patch_indices_list = []
         num_patches = 0
+
+        step_attention_rules = {}
         if attention_rules is None:
             attention_rules = generate_default_attention_rules(region_guidance or [], delete_main_prompt=delete_main_prompt, bboxes_attend_to_each_other=True, has_image_prompt=False, symmetric_masking=symmetric_masking)
-            
+        elif isinstance(attention_rules, dict) and any(isinstance(k, int) for k in attention_rules.keys()):
+            step_attention_rules = attention_rules
+            attention_rules = generate_default_attention_rules(region_guidance or [], delete_main_prompt=delete_main_prompt, bboxes_attend_to_each_other=True, has_image_prompt=False, symmetric_masking=symmetric_masking)
+
         if region_guidance:
             prompt_embeds, text_ids, attention_mask, prompt_len, hint_lens, image_patch_indices_list, num_patches = self.process_region_guidance(
                 prompt_embeds=prompt_embeds,
@@ -1077,6 +1114,12 @@ class MultiRegionFluxKontextPipeline(
                 return_attention_mask=not enable_flex_attn,
             )
 
+        total_text_len = prompt_embeds.shape[1]
+
+
+        indices_map = None
+        total_seq_len = 0
+
         if enable_flex_attn and region_guidance is not None:
             self.set_attn_processor(FluxFlexAttentionProcessor)
             
@@ -1085,7 +1128,6 @@ class MultiRegionFluxKontextPipeline(
                  grid_w = width // self.vae_scale_factor // 2
                  num_patches = grid_h * grid_w
             
-            total_text_len = prompt_embeds.shape[1]
             total_seq_len = total_text_len + 2 * num_patches
             
             # Construct indices_map for Flux (Text + Image + Image_Copy)
@@ -1112,17 +1154,27 @@ class MultiRegionFluxKontextPipeline(
             bg_patches = list(all_patches - all_bbox_patches)
             
             # Helper to add image indices (Copy 1 and Copy 2)
-            def get_img_indices(patch_indices):
+            def get_combined_indices(patch_indices):
                 res = []
                 for p in patch_indices:
                     res.append(img_start_idx + p)
                     res.append(img_start_idx + num_patches + p)
                 return res
 
-            indices_map['Background'] = get_img_indices(bg_patches)
+            def get_noise_indices(patch_indices):
+                return [img_start_idx + p for p in patch_indices]
+
+            def get_image_indices(patch_indices):
+                return [img_start_idx + num_patches + p for p in patch_indices]
+
+            indices_map['Background'] = get_combined_indices(bg_patches)
+            indices_map['Noise Background'] = get_noise_indices(bg_patches)
+            indices_map['Image Background'] = get_image_indices(bg_patches)
             
             for i, indices in enumerate(image_patch_indices_list):
-                indices_map[f'BBox {i+1}'] = get_img_indices(indices)
+                indices_map[f'BBox {i+1}'] = get_combined_indices(indices)
+                indices_map[f'Noise BBox {i+1}'] = get_noise_indices(indices)
+                indices_map[f'Image BBox {i+1}'] = get_image_indices(indices)
 
             block_mask = create_flex_block_mask(
                 indices_map=indices_map,
@@ -1220,11 +1272,42 @@ class MultiRegionFluxKontextPipeline(
         # Check out more details here: https://github.com/huggingface/diffusers/pull/11696
         self.scheduler.set_begin_index(0)
 
+        active_rules = attention_rules
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
+
+                # Check for step-specific attention rules
+                current_rules = step_attention_rules.get(i, attention_rules)
+                if current_rules is not active_rules:
+                    if enable_flex_attn and region_guidance is not None and indices_map is not None:
+                        block_mask = create_flex_block_mask(
+                            indices_map=indices_map,
+                            total_seq_len=total_seq_len,
+                            attention_rules=current_rules,
+                            device=device,
+                            use_bitmask=flex_attn_use_bitmask
+                        )
+                        self._joint_attention_kwargs["flex_block_mask"] = block_mask
+                    elif region_guidance is not None:
+                         attention_mask = self._create_attention_mask(
+                            current_rules,
+                            num_patches,
+                            total_text_len,
+                            prompt_len,
+                            hint_lens,
+                            image_patch_indices_list,
+                            batch_size,
+                            num_images_per_prompt,
+                            device,
+                            mask_main_prompt_influence,
+                            symmetric_masking,
+                            delete_main_prompt,
+                        )
+                         self._joint_attention_kwargs["attention_mask"] = attention_mask
+                    active_rules = current_rules
 
                 self._current_timestep = t
                 if image_embeds is not None:

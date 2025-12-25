@@ -516,15 +516,34 @@ class RePlanPipeline:
                     header = f"{' ':<{col_width}}" + "".join(
                         [f"{comp:<{col_width}}" for comp in components]
                     )
-                    f.write(header + "\n")
-                    f.write("-" * len(header) + "\n")
+                    
+                    is_step_based = isinstance(attention_rules, dict) and any(isinstance(k, int) for k in attention_rules.keys())
 
-                    for q_comp in components:
-                        row_str = f"{q_comp:<{col_width}}"
-                        for k_comp in components:
-                            state = "✅" if attention_rules.get((q_comp, k_comp)) else "❌"
-                            row_str += f"{state:<{col_width}}"
-                        f.write(row_str + "\n")
+                    if is_step_based:
+                        f.write("Step-based attention rules provided:\n")
+                        sorted_steps = sorted([k for k in attention_rules.keys() if isinstance(k, int)])
+                        for step in sorted_steps:
+                            rules = attention_rules[step]
+                            f.write(f"\n[Step {step}]\n")
+                            f.write(header + "\n")
+                            f.write("-" * len(header) + "\n")
+                            for q_comp in components:
+                                row_str = f"{q_comp:<{col_width}}"
+                                for k_comp in components:
+                                    state = "✅" if rules.get((q_comp, k_comp)) else "❌"
+                                    row_str += f"{state:<{col_width}}"
+                                f.write(row_str + "\n")
+                    else:
+                        f.write(header + "\n")
+                        f.write("-" * len(header) + "\n")
+
+                        for q_comp in components:
+                            row_str = f"{q_comp:<{col_width}}"
+                            for k_comp in components:
+                                state = "✅" if attention_rules.get((q_comp, k_comp)) else "❌"
+                                row_str += f"{state:<{col_width}}"
+                            f.write(row_str + "\n")
+
         else:
             config_info = {
                 "instruction": instruction,
