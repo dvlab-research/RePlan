@@ -78,7 +78,7 @@ def expand_key_to_split(key):
     return [key]
 
 def generate_default_split_rules(num_regions, has_image_prompt=True):
-    # 1. 定义逻辑组件
+    # 1. logical components
     logical_components = ['Main Prompt']
     if has_image_prompt: 
         logical_components.append('Image Prompt')
@@ -90,14 +90,14 @@ def generate_default_split_rules(num_regions, has_image_prompt=True):
     logical_components.extend(bbox_components)
     logical_components.append('Background')
     
-    # 2. 生成逻辑规则 (全 False 初始化)
+    # 2. logic rules
     logical_rules = { (q, k): False for q in logical_components for k in logical_components }
 
     # (A) Self Attention
     for c in logical_components:
         logical_rules[(c, c)] = True
 
-    # (B) Image Prompt Logic (仅当存在时)
+    # (B) Image Prompt Logic 
     if has_image_prompt:
         for c in logical_components:
             if c != 'Image Prompt':
@@ -123,7 +123,7 @@ def generate_default_split_rules(num_regions, has_image_prompt=True):
         for img_c in img_logical_group:
             logical_rules[(hint, img_c)] = True
 
-    # 3. 分裂规则 (Split)
+    # 3. Split
     final_rules = {}
     for (q_logic, k_logic), val in logical_rules.items():
         if val:
@@ -131,7 +131,6 @@ def generate_default_split_rules(num_regions, has_image_prompt=True):
                 for k in expand_key_to_split(k_logic):
                     final_rules[(q, k)] = True
                     
-    # 再次确保 Self 存在 (防止漏网)
     all_real = []
     for lc in logical_components: all_real.extend(expand_key_to_split(lc))
     for c in all_real: final_rules[(c, c)] = True
@@ -371,7 +370,7 @@ FULL_PAGE_TEMPLATE = r"""
         </div>
 
         <div class="col col-right">
-            <div class="label">3. Result</div>
+            <div class="label">Result</div>
             <div class="result-container">
                 <img id="result-img" class="result-img">
                 <div id="result-placeholder" style="color:#9ca3af; font-size:14px;">Result will appear here</div>
@@ -385,7 +384,7 @@ FULL_PAGE_TEMPLATE = r"""
                 </div>
             </div>
 
-            <div class="label" style="margin-top:15px;">4. Attention Rules</div>
+            <div class="label" style="margin-top:15px;">Attention Rules</div>
             <div class="attn-container">
                 <div class="attn-header" onclick="window.AttnManager.toggleView()">
                     <span style="display:flex; align-items:center;">
@@ -1135,7 +1134,7 @@ def main():
                 f"const HAS_IMAGE_PROMPT = {js_bool};"
             )
             
-            default_ratio = "0.7" if current_type == "qwen" else "0.0"
+            default_ratio = "0.5" if current_type == "qwen" else "0.0"
             html_content = html_content.replace('value="0.0"', f'value="{default_ratio}"')
             
             default_expand = "0.05" if current_type == "qwen" else "0.15"

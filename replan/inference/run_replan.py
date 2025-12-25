@@ -78,7 +78,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--disable_flex_attn", action="store_false", dest="enable_flex_attn")
     parser.add_argument("--flex_attn_use_bitmask", action="store_true", default=True)
     parser.add_argument("--flex_attn_use_densemask", action="store_false", dest="flex_attn_use_bitmask")
-    parser.add_argument("--attention_switch_step", type=float, default=None, help="Step or ratio to switch attention rules.")
+    parser.add_argument("--attention_switch_step", type=float, default=None, help="Step or ratio to switch attention rules. Default and recommended: 0.5 for qwen, 0.0 for flux.")
 
     return parser
 
@@ -128,7 +128,7 @@ def main(argv=None) -> int:
         if args.expand_value is None:
             args.expand_value = 0.0
         if args.attention_switch_step is None:
-            args.attention_switch_step = 0.7
+            args.attention_switch_step = 0.5
     else:
         if args.expand_value is None:
             args.expand_value = 0.15
