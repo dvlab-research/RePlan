@@ -64,7 +64,8 @@ def build_argparser() -> argparse.ArgumentParser:
         type=str,
         default="keep remaining parts of this image unchanged",
     )
-    parser.add_argument("--expand_value", type=float, default=0.15)
+    
+    parser.add_argument("--expand_value", type=float, default=None)
     parser.add_argument("--expand_mode", type=str, default="ratio", choices=["ratio", "pixels"])
     parser.add_argument("--bboxes_attend_to_each_other", action="store_true", default=True)
     parser.add_argument(
@@ -77,6 +78,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--disable_flex_attn", action="store_false", dest="enable_flex_attn")
     parser.add_argument("--flex_attn_use_bitmask", action="store_true", default=True)
     parser.add_argument("--flex_attn_use_densemask", action="store_false", dest="flex_attn_use_bitmask")
+    parser.add_argument("--attention_switch_step", type=float, default=None, help="Step or ratio to switch attention rules.")
 
     return parser
 
@@ -104,6 +106,7 @@ def interactive_mode(args, pipeline: RePlanPipeline):
                 only_save_image=args.only_save_image,
                 enable_flex_attn=args.enable_flex_attn,
                 flex_attn_use_bitmask=args.flex_attn_use_bitmask,
+                attention_switch_step=args.attention_switch_step,
             )
             print(f"Results: {results.get('edit_folder')}")
             print(f"Final image: {results.get('final_path')}")
@@ -120,6 +123,17 @@ def main(argv=None) -> int:
         sys.path.insert(0, project_root)
 
     args = build_argparser().parse_args(argv)
+
+    if args.pipeline_type == "qwen":
+        if args.expand_value is None:
+            args.expand_value = 0.0
+        if args.attention_switch_step is None:
+            args.attention_switch_step = 0.7
+    else:
+        if args.expand_value is None:
+            args.expand_value = 0.15
+        if args.attention_switch_step is None:
+            args.attention_switch_step = 0.05
 
     if args.image_dir is None:
         args.image_dir = project_root
@@ -166,6 +180,7 @@ def main(argv=None) -> int:
         only_save_image=args.only_save_image,
         enable_flex_attn=args.enable_flex_attn,
         flex_attn_use_bitmask=args.flex_attn_use_bitmask,
+        attention_switch_step=args.attention_switch_step,
     )
 
     print(f"Saved results to: {results.get('edit_folder')}")

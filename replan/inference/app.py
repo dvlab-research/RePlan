@@ -4,7 +4,7 @@ import sys
 import json
 import base64
 import threading
-import re  # <--- 确保引用 re
+import re
 from io import BytesIO
 from pathlib import Path
 from datetime import datetime
@@ -66,6 +66,77 @@ def _parse_torch_dtype(dtype_str: str) -> torch.dtype:
     if s in {"bf16", "bfloat16"}: return torch.bfloat16
     if s in {"fp16", "float16", "half"}: return torch.float16
     return torch.float32
+
+# ================= Helper Functions =================
+def expand_key_to_split(key):
+    if key == 'Background':
+        return ['Noise Background', 'Image Background']
+    bbox_match = re.match(r'^BBox (\d+)$', key)
+    if bbox_match:
+        idx = bbox_match.group(1)
+        return [f'Noise BBox {idx}', f'Image BBox {idx}']
+    return [key]
+
+def generate_default_split_rules(num_regions, has_image_prompt=True):
+    # 1. 定义逻辑组件
+    logical_components = ['Main Prompt']
+    if has_image_prompt: 
+        logical_components.append('Image Prompt')
+    
+    hint_components = [f'Hint {i+1}' for i in range(num_regions)]
+    bbox_components = [f'BBox {i+1}' for i in range(num_regions)]
+    
+    logical_components.extend(hint_components)
+    logical_components.extend(bbox_components)
+    logical_components.append('Background')
+    
+    # 2. 生成逻辑规则 (全 False 初始化)
+    logical_rules = { (q, k): False for q in logical_components for k in logical_components }
+
+    # (A) Self Attention
+    for c in logical_components:
+        logical_rules[(c, c)] = True
+
+    # (B) Image Prompt Logic (仅当存在时)
+    if has_image_prompt:
+        for c in logical_components:
+            if c != 'Image Prompt':
+                logical_rules[('Image Prompt', c)] = True
+                logical_rules[(c, 'Image Prompt')] = True
+    
+    # (C) Image Internal & Cross
+    img_logical_group = bbox_components + ['Background']
+    
+    for q in img_logical_group:
+        for k in img_logical_group:
+            logical_rules[(q, k)] = True
+        # Cross with Main Prompt
+        logical_rules[(q, 'Main Prompt')] = True
+        logical_rules[('Main Prompt', q)] = True
+
+    # (D) Hint <-> BBox
+    for i in range(num_regions):
+        bbox = f'BBox {i+1}'
+        hint = f'Hint {i+1}'
+        logical_rules[(bbox, hint)] = True
+        # Hint sees all image parts
+        for img_c in img_logical_group:
+            logical_rules[(hint, img_c)] = True
+
+    # 3. 分裂规则 (Split)
+    final_rules = {}
+    for (q_logic, k_logic), val in logical_rules.items():
+        if val:
+            for q in expand_key_to_split(q_logic):
+                for k in expand_key_to_split(k_logic):
+                    final_rules[(q, k)] = True
+                    
+    # 再次确保 Self 存在 (防止漏网)
+    all_real = []
+    for lc in logical_components: all_real.extend(expand_key_to_split(lc))
+    for c in all_real: final_rules[(c, c)] = True
+
+    return final_rules
 
 # ================= Frontend Template =================
 
@@ -144,6 +215,27 @@ FULL_PAGE_TEMPLATE = r"""
         .ex-item img { width: 100%; height: 100%; object-fit: cover; }
         .ex-item .ex-desc { display: none; position: absolute; bottom:0; left:0; right:0; background:rgba(0,0,0,0.7); color:#fff; font-size:9px; padding:2px; text-align:center; pointer-events:none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .ex-item:hover .ex-desc { display: block; }
+
+        /* --- Attention Matrix Styles (Updated for Collapse & Fix) --- */
+        .attn-container { border: 1px solid #374151; border-radius: 6px; background: #111827; overflow: hidden; margin-top: 5px; flex-shrink: 0; }
+        .attn-header { background: #1f2937; padding: 6px 10px; font-size: 11px; color: #9ca3af; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #374151; cursor: pointer; user-select: none; min-height: 32px; }
+        .attn-header:hover { background: #374151; color: white; }
+        
+        /* Collapsible States */
+        .attn-table-wrap { overflow: auto; max-height: 300px; min-height: 120px; padding: 0; transition: all 0.2s ease; } 
+        .attn-table-wrap.collapsed { max-height: 0; min-height: 0; opacity: 0; pointer-events: none; }
+        
+        .attn-caret { display: inline-block; transition: transform 0.2s; margin-right: 6px; font-size: 10px; }
+        .attn-caret.closed { transform: rotate(-90deg); }
+
+        .attn-table { border-collapse: separate; border-spacing: 0; width: max-content; font-family: ui-monospace, monospace; font-size: 10px; }
+        .attn-table th { color: #9ca3af; padding: 4px; font-weight: normal; border-bottom: 1px solid #374151; border-right: 1px solid #374151; min-width: 40px; text-align: center; background: #1f2937; position: sticky; top: 0; z-index: 10; }
+        .attn-table td { border-bottom: 1px solid #374151; border-right: 1px solid #374151; padding: 0; text-align: center; height: 24px; vertical-align: middle; }
+        .attn-table .row-label { text-align: left; padding-left: 8px; color: #d1d5db; background: #1f2937; min-width: 100px; position: sticky; left: 0; z-index: 5; border-right: 2px solid #374151; }
+        .attn-cell { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; cursor: pointer; min-width: 24px; }
+        .attn-cell:hover { background: rgba(255,255,255,0.1); }
+        .attn-v { color: #10b981; font-weight: bold; font-size: 12px; }
+        .attn-x { color: #ef4444; font-weight: bold; font-size: 12px; opacity: 0.3; }
 
         /* === Editor Styles === */
         .editor-container * { box-sizing: border-box; }
@@ -292,12 +384,41 @@ FULL_PAGE_TEMPLATE = r"""
                     <div id="step-info" style="font-size:12px; font-weight:normal; margin-top:2px;"></div>
                 </div>
             </div>
+
+            <div class="label" style="margin-top:15px;">4. Attention Rules</div>
+            <div class="attn-container">
+                <div class="attn-header" onclick="window.AttnManager.toggleView()">
+                    <span style="display:flex; align-items:center;">
+                        <span id="attn-caret" class="attn-caret closed">▼</span> 
+                        Matrix (Query → Key)
+                    </span>
+                    <span style="cursor:pointer; text-decoration:underline" onclick="event.stopPropagation(); window.AttnManager.refresh(true)">Reset Default</span>
+                </div>
+                <div id="attn-matrix-root" class="attn-table-wrap collapsed">
+                    </div>
+            </div>
             
             <div class="label" style="margin-top:10px;">Settings</div>
             <div style="margin-bottom:10px; background:#f9fafb; padding:10px; border-radius:6px; border:1px solid #e5e7eb;">
-                <div style="display:flex; justify-content:space-between; align-items:center; font-size:12px; color:#374151; margin-bottom:5px;">
-                    <span style="font-weight:600;">Inference Steps</span>
+                <div style="display:flex; justify-content:space-between; align-items:center; font-size:12px; color:#374151; margin-bottom:8px;">
+                    <span style="font-weight:600;">Total Steps</span>
                     <input type="number" id="steps-input" min="1" max="100" value="28" style="width:60px; padding:4px; border:1px solid #d1d5db; border-radius:4px; text-align:right;">
+                </div>
+                
+                <div style="display:flex; justify-content:space-between; align-items:center; font-size:12px; color:#374151; margin-bottom:8px;">
+                    <div style="display:flex; flex-direction:column;">
+                        <span style="font-weight:600;">Rule Switch Ratio</span>
+                        <span style="font-size:9px; color:#9ca3af;">Custom Rules steps ratio (0-1), custom rules will be used before this step</span>
+                    </div>
+                    <input type="number" id="switch-step-input" min="0" max="1.0" step="0.1" value="0.0" style="width:60px; padding:4px; border:1px solid #d1d5db; border-radius:4px; text-align:right;">
+                </div>
+
+                <div style="display:flex; justify-content:space-between; align-items:center; font-size:12px; color:#374151;">
+                    <div style="display:flex; flex-direction:column;">
+                        <span style="font-weight:600;">Expand Value</span>
+                        <span style="font-size:9px; color:#9ca3af;">Bbox expansion ratio during actual editing</span>
+                    </div>
+                    <input type="number" id="expand-input" min="0" max="1.0" step="0.05" value="0.15" style="width:60px; padding:4px; border:1px solid #d1d5db; border-radius:4px; text-align:right;">
                 </div>
             </div>
 
@@ -306,6 +427,148 @@ FULL_PAGE_TEMPLATE = r"""
     </div>
 
 <script>
+
+const HAS_IMAGE_PROMPT = true;
+// ================= Attention Rule Manager =================
+window.AttnManager = {
+    components: [],
+    rules: {},
+
+    getLogicalGroup: function(name) {
+        if (name.includes('Background')) return 'Background';
+        if (name.startsWith('Main') || name.startsWith('Image P') || name.startsWith('Hint')) return name;
+        const m = name.match(/(Noise|Image) BBox (\d+)/);
+        return m ? `BBox ${m[2]}` : name;
+    },
+
+    isImageComp: function(group) {
+        return group === 'Background' || group.startsWith('BBox');
+    },
+
+    checkDefaultRule: function(q, k, hasImagePrompt) {
+        // Special override: Noise Background -> Noise BBox is False
+        if (q === 'Noise Background' && k.startsWith('Noise BBox')) {
+            return false; 
+        }
+
+        const qGroup = this.getLogicalGroup(q);
+        const kGroup = this.getLogicalGroup(k);
+
+        if (q === k) return true;
+
+        if (hasImagePrompt) {
+            if (qGroup === 'Image Prompt' || kGroup === 'Image Prompt') return true;
+        }
+
+        const qIsImg = this.isImageComp(qGroup);
+        const kIsImg = this.isImageComp(kGroup);
+
+        if (qIsImg && kIsImg) return true;
+
+        if ((qIsImg && kGroup === 'Main Prompt') || (qGroup === 'Main Prompt' && kIsImg)) return true;
+
+        if (qGroup.startsWith('Hint')) {
+            if (kIsImg) return true;
+        }
+        if (kGroup.startsWith('Hint')) {
+             if (qGroup === `BBox ${kGroup.split(' ')[1]}`) return true;
+        }
+
+        return false;
+    },
+
+    toggleView: function() {
+        const root = document.getElementById('attn-matrix-root');
+        const caret = document.getElementById('attn-caret');
+        root.classList.toggle('collapsed');
+        caret.classList.toggle('closed');
+    },
+
+    refresh: function(forceReset = false) {
+        const boxes = window.EditorApp.state.boxes;
+        const num = boxes.length;
+        const hasImagePrompt = (typeof HAS_IMAGE_PROMPT !== 'undefined') ? HAS_IMAGE_PROMPT : true;
+
+        let comps = ['Main Prompt'];
+        if (hasImagePrompt) comps.push('Image Prompt');
+        
+        for(let i=1; i<=num; i++) {
+            comps.push(`Hint ${i}`);
+            comps.push(`Noise BBox ${i}`);
+            comps.push(`Image BBox ${i}`);
+        }
+        comps.push('Noise Background');
+        comps.push('Image Background');
+        
+        this.components = comps;
+
+        if(forceReset) {
+            this.rules = {};
+            comps.forEach(q => comps.forEach(k => {
+                this.rules[`${q}|${k}`] = this.checkDefaultRule(q, k, hasImagePrompt);
+            }));
+        } else {
+            const oldRules = this.rules;
+            this.rules = {};
+            
+            comps.forEach(q => comps.forEach(k => {
+                const key = `${q}|${k}`;
+                if (oldRules[key] !== undefined) {
+                    this.rules[key] = oldRules[key];
+                } else {
+                    this.rules[key] = this.checkDefaultRule(q, k, hasImagePrompt);
+                }
+            }));
+        }
+        this.render();
+    },
+
+    toggle: function(q, k) {
+        const key = `${q}|${k}`;
+        this.rules[key] = !this.rules[key];
+        this.render(); 
+    },
+
+    getShortLabel: function(name) {
+        if(name === 'Main Prompt') return 'Main';
+        if(name === 'Image Prompt') return 'ImgP';
+        if(name === 'Noise Background') return 'N.BG';
+        if(name === 'Image Background') return 'I.BG';
+        return name.replace('Hint ', 'H')
+                   .replace('Noise BBox ', 'N.B')
+                   .replace('Image BBox ', 'I.B');
+    },
+
+    render: function() {
+        const root = document.getElementById('attn-matrix-root');
+        if(!root) return;
+        
+        let html = '<table class="attn-table"><thead><tr><th style="z-index:20; left:0;">Q \\ K</th>';
+        this.components.forEach(c => {
+            html += `<th>${this.getShortLabel(c)}</th>`;
+        });
+        html += '</tr></thead><tbody>';
+
+        this.components.forEach(q => {
+            html += `<tr><td class="row-label" title="${q}">${this.getShortLabel(q)}</td>`;
+            this.components.forEach(k => {
+                const val = this.rules[`${q}|${k}`];
+                const icon = val ? '<span class="attn-v">●</span>' : '<span class="attn-x">×</span>';
+                const bgStyle = val ? 'background:rgba(16, 185, 129, 0.1);' : ''; 
+                
+                html += `<td style="${bgStyle}"><div class="attn-cell" onclick="window.AttnManager.toggle('${q}','${k}')" title="${q} -> ${k}">` + 
+                        icon + 
+                        `</div></td>`;
+            });
+            html += '</tr>';
+        });
+        html += '</tbody></table>';
+        root.innerHTML = html;
+    },
+
+    getRulesDict: function() { return this.rules; }
+};
+
 // ================= Configuration =================
 const EXAMPLES = [
     { src: "./custom_assets/cup.png", text: "Replace the glass that has been used and left on the desk with a small potted plant" },
@@ -389,6 +652,7 @@ window.EditorApp = {
                 this.dom.emptyState.classList.add('hidden');
                 this.dom.editorStage.classList.remove('hidden');
                 this.refreshOverlay();
+                window.AttnManager.refresh(true); // <--- Matrix Refresh
             };
         }
         if (xmlData) {
@@ -411,8 +675,6 @@ window.EditorApp = {
             hint: b.label
         }));
         
-        // [Fixed] Removed automatic fallback to instruction.
-        // We only get what is currently in the global prompt input.
         let globalPrompt = this.dom.globalInput ? this.dom.globalInput.value : "";
         
         return `<gen_image>${globalPrompt}</gen_image><region>${JSON.stringify(regionData)}</region>`;
@@ -444,6 +706,7 @@ window.EditorApp = {
                 });
                 this.renderList();
                 this.refreshOverlay();
+                window.AttnManager.refresh(true); // <--- Matrix Refresh
             } catch (e) { console.error("Parse Error", e); }
         }
     },
@@ -486,9 +749,6 @@ window.EditorApp = {
         if(labelEl) {
             labelEl.innerText = box.label;
             labelEl.style.backgroundColor = box.color;
-            
-            // Better positioning logic for label
-            // If box is too close to top, put label inside or below to avoid clipping
             if (sy < 30) {
                 labelEl.style.top = "0px";
                 labelEl.style.borderRadius = "0 0 4px 0";
@@ -546,6 +806,7 @@ window.EditorApp = {
             this.state.boxes = this.state.boxes.filter(b => b.id !== this.state.selectedId);
             this.deselectAll();
             this.renderList();
+            window.AttnManager.refresh(); // <--- Matrix Refresh
         }
     },
     
@@ -566,7 +827,6 @@ window.EditorApp = {
             const x = e.clientX - rect.left;
             const y = e.clientY - rect.top;
 
-            // 1. Check Resizing
             if(e.target.classList.contains('resize-handle')) {
                 const boxEl = e.target.closest('.bbox');
                 const id = parseInt(boxEl.dataset.id);
@@ -580,7 +840,6 @@ window.EditorApp = {
                 return;
             }
 
-            // 2. Check Dragging
             const clickedBox = e.target.closest('.bbox');
             if (clickedBox) {
                 const id = parseInt(clickedBox.dataset.id);
@@ -593,7 +852,6 @@ window.EditorApp = {
                 return;
             }
 
-            // 3. Drawing
             if(e.target === this.dom.overlay) {
                 this.deselectAll();
                 this.state.mode = 'drawing';
@@ -611,7 +869,6 @@ window.EditorApp = {
         window.addEventListener('mousemove', (e) => {
             if (this.state.mode === 'idle') return;
             const rect = this.dom.overlay.getBoundingClientRect();
-            // Clamp logic
             let x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
             let y = Math.max(0, Math.min(e.clientY - rect.top, rect.height));
             const scaleX = this.state.imgNaturalWidth / rect.width;
@@ -630,10 +887,8 @@ window.EditorApp = {
                 const dx = (x - this.state.startX) * scaleX;
                 const dy = (y - this.state.startY) * scaleY;
                 const [ix1, iy1, ix2, iy2] = this.state.initialBoxData.realRect;
-                
                 let nx1 = Math.max(0, Math.min(ix1 + dx, this.state.imgNaturalWidth - (ix2 - ix1)));
                 let ny1 = Math.max(0, Math.min(iy1 + dy, this.state.imgNaturalHeight - (iy2 - iy1)));
-                
                 box.realRect = [nx1, ny1, nx1 + (ix2 - ix1), ny1 + (iy2 - iy1)];
                 this.updateBoxVisual(box);
             }
@@ -643,15 +898,12 @@ window.EditorApp = {
                 const realY = y * scaleY;
                 let [x1, y1, x2, y2] = this.state.initialBoxData.realRect;
                 const h = this.state.resizeHandle;
-                
                 if (h.includes('w')) x1 = Math.min(realX, x2 - 10);
                 if (h.includes('e')) x2 = Math.max(realX, x1 + 10);
                 if (h.includes('n')) y1 = Math.min(realY, y2 - 10);
                 if (h.includes('s')) y2 = Math.max(realY, y1 + 10);
-                
                 x1 = Math.max(0, x1); y1 = Math.max(0, y1);
                 x2 = Math.min(this.state.imgNaturalWidth, x2); y2 = Math.min(this.state.imgNaturalHeight, y2);
-
                 box.realRect = [x1, y1, x2, y2];
                 this.updateBoxVisual(box);
             }
@@ -664,7 +916,6 @@ window.EditorApp = {
                     const overlayRect = this.dom.overlay.getBoundingClientRect();
                     this.state.activeBoxEl.remove();
                     this.state.activeBoxEl = null;
-                    
                     if (domRect.width > 5 && domRect.height > 5) {
                         const scaleX = this.state.imgNaturalWidth / overlayRect.width;
                         const scaleY = this.state.imgNaturalHeight / overlayRect.height;
@@ -672,7 +923,6 @@ window.EditorApp = {
                         const y1 = (domRect.top - overlayRect.top) * scaleY;
                         const x2 = x1 + (domRect.width * scaleX);
                         const y2 = y1 + (domRect.height * scaleY);
-                        
                         const newBox = {
                             id: this.state.boxIdCounter++,
                             realRect: [x1, y1, x2, y2],
@@ -682,12 +932,12 @@ window.EditorApp = {
                         this.state.boxes.push(newBox);
                         this.createBoxElement(newBox);
                         this.selectBox(newBox.id);
+                        window.AttnManager.refresh(); // <--- Matrix Refresh
                     }
                 }
             }
             this.state.mode = 'idle';
         });
-        
         window.addEventListener('resize', () => this.refreshOverlay());
     }
 };
@@ -695,12 +945,7 @@ window.EditorApp = {
 // ================= Main App Logic =================
 window.App = {
     currentFile: null,
-
-    init: function() {
-        console.log("Main App Initialized");
-        this.renderExamples();
-    },
-    
+    init: function() { this.renderExamples(); },
     renderExamples: function() {
         const list = document.getElementById('example-list');
         if (!list) return;
@@ -708,15 +953,10 @@ window.App = {
         EXAMPLES.forEach(ex => {
             const div = document.createElement('div');
             div.className = "ex-item";
-            div.innerHTML = `
-                <img src="${ex.src}" alt="example">
-                <div class="ex-desc">${ex.text}</div>
-            `;
+            div.innerHTML = `<img src="${ex.src}" alt="example"><div class="ex-desc">${ex.text}</div>`;
             div.onclick = async () => {
                 try {
-                    // Fetch blob and simulate upload
                     const res = await fetch(ex.src);
-                    if (!res.ok) throw new Error("Fetch failed: " + res.status);
                     const blob = await res.blob();
                     const file = new File([blob], "example.png", { type: blob.type });
                     this.loadFile(file);
@@ -726,133 +966,98 @@ window.App = {
             list.appendChild(div);
         });
     },
-
     loadFile: function(file) {
         this.currentFile = file;
         const reader = new FileReader();
         reader.onload = (e) => {
-            const preview = document.getElementById('input-preview');
-            const text = document.getElementById('upload-text');
-            if(preview) { preview.src = e.target.result; preview.style.display = 'block'; }
-            if(text) text.style.display = 'none';
+            document.getElementById('input-preview').src = e.target.result;
+            document.getElementById('input-preview').style.display = 'block';
+            document.getElementById('upload-text').style.display = 'none';
             if (window.EditorApp) window.EditorApp.loadData(e.target.result, null);
-            
-            // Enable editing immediately (doesn't require PLAN step)
             document.getElementById('btn-edit').disabled = false;
         };
         reader.readAsDataURL(file);
     },
-
     runPlan: async function() {
         if (!this.currentFile) return alert("Please upload an image first.");
         const instr = document.getElementById('instruction').value;
-        if (!instr) return alert("Please enter instruction.");
         this.setLoading(true);
-        
         const fd = new FormData();
-        fd.append('image', this.currentFile);
-        fd.append('instruction', instr);
-
+        fd.append('image', this.currentFile); fd.append('instruction', instr);
         try {
             const res = await fetch('/api/plan', { method: 'POST', body: fd });
-            if (!res.ok) throw new Error("API Error " + res.status);
             const data = await res.json();
-            if (window.EditorApp) {
-                window.EditorApp.loadData(data.image_base64, data.xml);
-            }
+            if (window.EditorApp) window.EditorApp.loadData(data.image_base64, data.xml);
         } catch(e) { alert(e.message); } finally { this.setLoading(false); }
     },
-
-    runEdit: async function() {
-        if (!window.EditorApp) return;
-        
-        // [修复] 增加对 Global Prompt 的非空校验
+runEdit: async function() {
         const globalPromptEl = document.getElementById('global-prompt');
-        if (!globalPromptEl || !globalPromptEl.value.trim()) {
-            alert("⚠️ Global Prompt cannot be empty. Please enter a description.");
-            return;
-        }
-
-        const xml = window.EditorApp.getData(); 
-        const steps = document.getElementById('steps-input').value;
-
-        // [修复] 在此函数作用域内定义 instr
-        const instr = document.getElementById('instruction').value || ""; 
+        if (!globalPromptEl || !globalPromptEl.value.trim()) return alert("⚠️ Global Prompt cannot be empty.");
         
-        this.setLoading(true);
+        this.setLoading(true); 
         this.resetProgress();
         
-        const runId = "run_" + Date.now() + "_" + Math.floor(Math.random() * 1000);
+        const runId = "run_" + Date.now(); 
         this.startPolling(runId);
-
+        
         const fd = new FormData();
         fd.append('image', this.currentFile);
-        fd.append('instruction', instr); // 此时 instr 已定义
-        fd.append('xml', xml);
-        fd.append('num_inference_steps', steps);
+        fd.append('instruction', document.getElementById('instruction').value || "");
+        fd.append('xml', window.EditorApp.getData());
+        fd.append('num_inference_steps', document.getElementById('steps-input').value);
         fd.append('run_id', runId);
+        fd.append('attention_rules', JSON.stringify(window.AttnManager.getRulesDict())); 
+        
+        const switchStep = document.getElementById('switch-step-input').value;
+        fd.append('attention_switch_step', switchStep);
+
+        const expandVal = document.getElementById('expand-input').value;
+        fd.append('expand_value', expandVal);
 
         try {
             const res = await fetch('/api/edit', { method: 'POST', body: fd });
-            if (!res.ok) throw new Error("API Error");
+            if (!res.ok) {
+                const errorText = await res.text(); 
+                throw new Error(`Server Error (${res.status}): ${errorText}`);
+            }
             const data = await res.json();
             const img = document.getElementById('result-img');
-            img.src = data.result_base64;
+            img.src = data.result_base64; 
             img.style.display = 'block';
             document.getElementById('result-placeholder').style.display = 'none';
-        } catch(e) { alert(e.message); } finally { 
+        } catch(e) { 
+            alert(e.message); 
+        } finally { 
             this.setLoading(false); 
-            this.stopPolling();
+            this.stopPolling(); 
         }
     },
-    
     pollInterval: null,
-    
     startPolling: function(runId) {
         if(this.pollInterval) clearInterval(this.pollInterval);
         this.pollInterval = setInterval(async () => {
             try {
                 const res = await fetch('/api/progress?id=' + runId);
-                if(res.ok) {
-                    const data = await res.json();
-                    if(data.progress) {
-                        this.updateProgress(data);
-                    }
-                }
-            } catch(e) { console.error("Poll error", e); }
+                const data = await res.json();
+                if(data.progress) this.updateProgress(data);
+            } catch(e) {}
         }, 500);
     },
-    
-    stopPolling: function() {
-        if(this.pollInterval) clearInterval(this.pollInterval);
-        this.pollInterval = null;
-    },
-    
+    stopPolling: function() { clearInterval(this.pollInterval); this.pollInterval = null; },
     resetProgress: function() {
-        const bar = document.getElementById('progress-bar');
-        const info = document.getElementById('step-info');
-        const container = document.getElementById('progress-bar-container');
-        if(bar) bar.style.width = '0%';
-        if(info) info.innerText = '';
-        if(container) container.style.display = 'block';
+        document.getElementById('progress-bar').style.width = '0%';
+        document.getElementById('progress-bar-container').style.display = 'block';
     },
-    
     updateProgress: function(data) {
-        const pct = Math.round(data.progress * 100);
-        const bar = document.getElementById('progress-bar');
-        const info = document.getElementById('step-info');
-        if(bar) bar.style.width = pct + '%';
-        if(info) info.innerText = `Step ${data.step} / ${data.total}`;
+        document.getElementById('progress-bar').style.width = Math.round(data.progress * 100) + '%';
+        document.getElementById('step-info').innerText = `Step ${data.step} / ${data.total}`;
     },
-
     setLoading: function(isLoading) {
-        const mask = document.getElementById('loading-mask');
-        if(mask) mask.style.display = isLoading ? 'flex' : 'none';
+        document.getElementById('loading-mask').style.display = isLoading ? 'flex' : 'none';
         document.getElementById('btn-plan').disabled = isLoading;
         document.getElementById('btn-edit').disabled = isLoading;
     }
 };
-
 window.App.init();
 </script>
 </body>
@@ -882,18 +1087,12 @@ def main():
     parser.add_argument("--dtype", default="bf16")
     args = parser.parse_args()
 
-    if args.pipeline_type == "flux":
-        DEFAULT_STEPS = 28
-    elif args.pipeline_type == "qwen":
-        DEFAULT_STEPS = 50
+    if args.pipeline_type == "flux": DEFAULT_STEPS = 28
+    else: DEFAULT_STEPS = 50
 
-    if not os.path.isabs(args.output_dir):
-        output_base_dir = os.path.join(project_root, args.output_dir)
-    else:
-        output_base_dir = args.output_dir
-    print(f"Output Base Dir: {output_base_dir}")
+    if not os.path.isabs(args.output_dir): output_base_dir = os.path.join(project_root, args.output_dir)
+    else: output_base_dir = args.output_dir
     os.makedirs(output_base_dir, exist_ok=True)
-    print(f"Project Root: {project_root}")
 
     if pipeline is None:
         print(f"Initializing RePlanPipeline ({args.pipeline_type})...")
@@ -910,145 +1109,133 @@ def main():
             image_dir=project_root,
         )
 
-    theme = gr.themes.Default(
-        font=["ui-sans-serif", "system-ui", "sans-serif"],
-        font_mono=["ui-monospace", "Consolas", "monospace"]
-    )
-
     block_css = """
     .gradio-container { padding: 0 !important; margin: 0 !important; width: 100% !important; max-width: 100% !important; height: 100vh !important; overflow: hidden; }
     footer { display: none !important; }
     iframe { width: 100%; height: 100vh; border: none; display: block; }
     """
         
-    with gr.Blocks(title="RePlan Pro", css=block_css, theme=theme) as demo:
+    with gr.Blocks(title="RePlan Pro", css=block_css) as demo:
         gr.HTML('<iframe src="/custom_ui"></iframe>')
 
     def mount_custom_routes(app: FastAPI):
         assets_path = os.path.join(project_root, "assets")
-        if os.path.exists(assets_path):
-            app.mount("/custom_assets", StaticFiles(directory=assets_path), name="assets")
-            print(f"Mounted Custom Assets: {assets_path}")
+        if os.path.exists(assets_path): app.mount("/custom_assets", StaticFiles(directory=assets_path), name="assets")
+        
 
         @app.get("/custom_ui", response_class=HTMLResponse)
         async def serve_ui():
-            # Inject default steps value
             html_content = FULL_PAGE_TEMPLATE.replace('value="28"', f'value="{DEFAULT_STEPS}"')
-            html_content = html_content.replace('>28</span>', f'>{DEFAULT_STEPS}</span>')
+            
+            current_type = getattr(pipeline, "pipeline_type", "flux")
+            js_bool = "true" if current_type == "qwen" else "false"
+            
+            html_content = html_content.replace(
+                "const HAS_IMAGE_PROMPT = true;", 
+                f"const HAS_IMAGE_PROMPT = {js_bool};"
+            )
+            
+            default_ratio = "0.7" if current_type == "qwen" else "0.0"
+            html_content = html_content.replace('value="0.0"', f'value="{default_ratio}"')
+            
+            default_expand = "0.05" if current_type == "qwen" else "0.15"
+            html_content = html_content.replace('value="0.15"', f'value="{default_expand}"')
+            
             return html_content
 
         @app.get("/api/progress")
-        async def api_progress(id: str):
-            if id in PROGRESS_STATES:
-                return JSONResponse(PROGRESS_STATES[id])
-            return JSONResponse({"progress": 0, "step": 0})
+        async def api_progress(id: str): return JSONResponse(PROGRESS_STATES.get(id, {"progress": 0, "step": 0}))
 
         @app.post("/api/plan")
         async def api_plan(image: UploadFile = File(...), instruction: str = Form(...)):
             with gpu_lock:
                 run_id = f"plan_{datetime.now().strftime('%H%M%S')}"
                 temp_path = os.path.join(output_base_dir, f"{run_id}.png")
-                
-                content = await image.read()
-                with open(temp_path, "wb") as f:
-                    f.write(content)
-                
-                print(f"[API Plan] {instruction}")
+                with open(temp_path, "wb") as f: f.write(await image.read())
                 res = pipeline.get_vlm_response(instruction, temp_path)
-                xml = res[0] if isinstance(res, tuple) else res
-                
-                return JSONResponse({
-                    "xml": xml,
-                    "image_base64": image_to_base64(temp_path)
-                })
+                return JSONResponse({"xml": res[0] if isinstance(res, tuple) else res, "image_base64": image_to_base64(temp_path)})
 
         @app.post("/api/edit")
         async def api_edit(
             image: UploadFile = File(...), 
-            instruction: str = Form(...), 
             xml: str = Form(...),
             num_inference_steps: int = Form(DEFAULT_STEPS),
-            run_id: str = Form(None)
+            run_id: str = Form(None),
+            attention_rules: str = Form(None),
+            attention_switch_step: float = Form(0.0),
+            expand_value: float = Form(0.15)
         ):
-            if not run_id: 
-                run_id = f"edit_{datetime.now().strftime('%H%M%S')}"
+            if not run_id: run_id = f"edit_{datetime.now().strftime('%H%M%S')}"
             
-            # Callback for progress
             def callback(pipe, step_index, timestep, callback_kwargs):
-                # Using standard diffusers callback_on_step_end signature
-                # step_index: int, timestep: int, callback_kwargs: dict
-                
-                # Ensure step is within bounds
-                current_step = step_index + 1
-                progress = min(current_step / num_inference_steps, 1.0)
-                
-                PROGRESS_STATES[run_id] = {
-                    "progress": progress,
-                    "step": current_step,
-                    "total": num_inference_steps
-                }
+                PROGRESS_STATES[run_id] = {"progress": min((step_index+1)/num_inference_steps, 1.0), "step": step_index+1, "total": num_inference_steps}
                 return callback_kwargs
+
+            current_type = getattr(pipeline, "pipeline_type", "flux")
+            use_image_prompt = (current_type == "qwen")
+
+            custom_rules_map = {}
+            if attention_rules:
+                try:
+                    raw = json.loads(attention_rules)
+                    custom_rules_map = { tuple(k.split('|')): v for k, v in raw.items() }
+                except Exception as e:
+                    print(f"Error parsing custom rules: {e}")
+
+            num_regions = 0
+            try:
+                region_match = re.search(r'<region>(.*?)</region>', xml, re.DOTALL)
+                if region_match:
+                    regions = json.loads(region_match.group(1))
+                    num_regions = len(regions)
+            except: pass
+
+            default_rules_map = generate_default_split_rules(num_regions, has_image_prompt=use_image_prompt)
+
+            step_attention_dict = {}
+            
+            if attention_switch_step <= 1.0:
+                switch_at = int(attention_switch_step * num_inference_steps)
+            else:
+                switch_at = int(attention_switch_step)
+                
+            switch_at = max(0, min(switch_at, num_inference_steps))
+            
+            for step in range(num_inference_steps):
+                if step < switch_at:
+                    step_attention_dict[step] = custom_rules_map if custom_rules_map else default_rules_map
+                else:
+                    step_attention_dict[step] = default_rules_map
 
             with gpu_lock:
                 try:
-                    final_dir = os.path.join(output_base_dir, run_id)
                     temp_path = os.path.join(output_base_dir, f"{run_id}_src.png")
+                    with open(temp_path, "wb") as f: f.write(await image.read())
                     
-                    content = await image.read()
-                    with open(temp_path, "wb") as f:
-                        f.write(content)
-                    
-                    # --- NEW LOGIC START ---
-                    
-                    # 1. Parse XML to extract Global Prompt for printing
-                    global_prompt_match = re.search(r'<gen_image>(.*?)</gen_image>', xml, re.DOTALL)
-                    global_prompt = global_prompt_match.group(1).strip() if global_prompt_match else "N/A"
-                    
-                    # 2. Count regions for info
-                    region_count = xml.count('bbox_2d')
+                    print(f"[API Edit] Steps: {num_inference_steps} | Switch Logic: {attention_switch_step} -> Step {switch_at}")
 
-                    # 3. Updated Print Statement
-                    print(f"[API Edit] Processing | Global: '{global_prompt}' | Regions: {region_count} | Steps: {num_inference_steps}")
-                    
                     res = pipeline.region_edit_with_attention(
                         image=temp_path,
                         instruction="",
-                        response=xml,   # <--- Model uses this for prompt & regions
-                        output_dir=final_dir,
-                        expand_value=0.2,
-                        expand_mode="ratio",
-                        bboxes_attend_to_each_other=True,
-                        symmetric_masking=False,
-                        only_save_image=False,
+                        response=xml,
+                        output_dir=os.path.join(output_base_dir, run_id),
+                        attention_rules=step_attention_dict, 
+                        expand_value=expand_value,
                         pipeline_kwargs={
                             "num_inference_steps": num_inference_steps,
                             "callback_on_step_end": callback
                         }
                     )
-                    edited_img = res[0] if isinstance(res, tuple) else res
-                    
-                    return JSONResponse({
-                        "result_base64": image_to_base64(edited_img)
-                    })
+                    return JSONResponse({"result_base64": image_to_base64(res[0] if isinstance(res, tuple) else res)})
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    return JSONResponse({"error": str(e)}, status_code=500)
                 finally:
-                    if run_id in PROGRESS_STATES: 
-                        del PROGRESS_STATES[run_id]
+                    if run_id in PROGRESS_STATES: del PROGRESS_STATES[run_id]
 
-    print("Launching Server...")
-    demo.launch(
-        server_name="0.0.0.0",
-        server_port=args.server_port,
-        share=args.share,
-        prevent_thread_lock=True,
-        allowed_paths=[project_root]
-    )
-    
-    if demo.app:
-        mount_custom_routes(demo.app)
-        print("✅ Custom UI mounted at /custom_ui")
-    else:
-        print("❌ Error: Failed to access Gradio FastAPI app.")
-
+    demo.launch(server_name="0.0.0.0", server_port=args.server_port, share=args.share, prevent_thread_lock=True)
+    if demo.app: mount_custom_routes(demo.app)
     demo.block_thread()
 
 if __name__ == "__main__":

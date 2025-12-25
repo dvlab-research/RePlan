@@ -11,89 +11,111 @@ from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
 from qwen_vl_utils import process_vision_info
 
 
+def expand_key_to_split(key):
+    if key == 'Background':
+        return ['Noise Background', 'Image Background']
+    bbox_match = re.match(r'^BBox (\d+)$', key)
+    if bbox_match:
+        idx = bbox_match.group(1)
+        return [f'Noise BBox {idx}', f'Image BBox {idx}']
+    return [key]
+
+
 def generate_default_attention_rules(
     bbox_data, 
     delete_main_prompt=False, 
     bboxes_attend_to_each_other=True, 
     has_image_prompt=False,
-    symmetric_masking=False
+    symmetric_masking=False,
+    noise_bg_attend_noise_bbox=True,
+    do_split=False
 ):
-    """Generate default attention rules dictionary"""
+    """Generate default attention rules dictionary (expanded version)"""
     num_regions = len(bbox_data) if bbox_data else 0
-    components = []
     
+    # 1. 定义逻辑组件
+    logical_components = []
     if not delete_main_prompt:
-        components.append('Main Prompt')
-    if has_image_prompt:
-        components.append('Image Prompt')
+        logical_components.append('Main Prompt')
+    if has_image_prompt: 
+        logical_components.append('Image Prompt')
     
     hint_components = [f'Hint {i+1}' for i in range(num_regions)]
     bbox_components = [f'BBox {i+1}' for i in range(num_regions)]
     
-    components.extend(hint_components)
-    components.extend(bbox_components)
-    components.append('Background')
+    logical_components.extend(hint_components)
+    logical_components.extend(bbox_components)
+    logical_components.append('Background')
     
-    rules = { (q, k): False for q in components for k in components }
+    # 2. 生成逻辑规则 (全 False 初始化)
+    logical_rules = { (q, k): False for q in logical_components for k in logical_components }
 
-    # 1. Self Attention (Basic)
-    if not delete_main_prompt:
-        rules[('Main Prompt', 'Main Prompt')] = True
-    for comp in hint_components:
-        rules[(comp, comp)] = True
-        
+    # (A) Self Attention
+    for c in logical_components:
+        logical_rules[(c, c)] = True
+
+    # (B) Image Prompt Logic (仅当存在时)
     if has_image_prompt:
-        # Image Prompt attends to itself
-        rules[('Image Prompt', 'Image Prompt')] = True
-        
-        # Image Prompt 和所有其他组件互相 attend
-        for comp in components:
-            if comp != 'Image Prompt':
-                rules[('Image Prompt', comp)] = True
-                rules[(comp, 'Image Prompt')] = True
-
-    # 2. Image Internal
-    img_components = bbox_components + ['Background']
+        for c in logical_components:
+            if c != 'Image Prompt':
+                logical_rules[('Image Prompt', c)] = True
+                logical_rules[(c, 'Image Prompt')] = True
+    
+    # (C) Image Internal & Cross
+    img_logical_group = bbox_components + ['Background']
+    
     if bboxes_attend_to_each_other:
-        for q_comp in img_components:
-            for k_comp in img_components:
-                rules[(q_comp, k_comp)] = True
+        for q in img_logical_group:
+            for k in img_logical_group:
+                logical_rules[(q, k)] = True
     else:
         # Only need to see Background
-        for q_comp in img_components:
-            rules[(q_comp, 'Background')] = True
+        for q_comp in img_logical_group:
+            logical_rules[(q_comp, 'Background')] = True
             if q_comp == 'Background':
-                for k in img_components: rules[('Background', k)] = True
-            else:
-                rules[(q_comp, q_comp)] = True # Self
+                for k in img_logical_group: logical_rules[('Background', k)] = True
     
-    # 3. Cross Component
+    # Cross with Main Prompt
     if not delete_main_prompt:
-        # Image sees Main Prompt
-        for q_comp in img_components:
-            rules[(q_comp, 'Main Prompt')] = True
-        # Main Prompt sees Image
-        for k_comp in img_components:
-            rules[('Main Prompt', k_comp)] = True
+        for q in img_logical_group:
+            logical_rules[(q, 'Main Prompt')] = True
+            logical_rules[('Main Prompt', q)] = True
 
+    # (D) Hint <-> BBox
     for i in range(num_regions):
-        rules[(f'BBox {i+1}', f'Hint {i+1}')] = True
+        bbox = f'BBox {i+1}'
+        hint = f'Hint {i+1}'
+        logical_rules[(bbox, hint)] = True
         
-    if symmetric_masking:
-        for i in range(num_regions):
-            rules[(f'Hint {i+1}', f'BBox {i+1}')] = True
-    else:
-        # Text sees all image patches
-        text_components = []
-        if not delete_main_prompt:
-            text_components.append('Main Prompt')
-        text_components.extend(hint_components)
-        
-        for q_comp in text_components:
-            for k_comp in img_components:
-                rules[(q_comp, k_comp)] = True
-    
-    return rules
+        if symmetric_masking:
+            logical_rules[(hint, bbox)] = True
+        else:
+            # Hint sees all image parts (standard behavior in app_test)
+            for img_c in img_logical_group:
+                logical_rules[(hint, img_c)] = True
+
+    if not do_split:
+        return logical_rules
+
+    # 3. 分裂规则 (Split)
+    final_rules = {}
+    for (q_logic, k_logic), val in logical_rules.items():
+        if val:
+            for q in expand_key_to_split(q_logic):
+                for k in expand_key_to_split(k_logic):
+                    # Check Noise BG -> Noise BBox constraint
+                    if not noise_bg_attend_noise_bbox:
+                        if q == 'Noise Background' and k.startswith('Noise BBox'):
+                            continue
+                    
+                    final_rules[(q, k)] = True
+                    
+    # 再次确保 Self 存在 (防止漏网)
+    all_real = []
+    for lc in logical_components: all_real.extend(expand_key_to_split(lc))
+    for c in all_real: final_rules[(c, c)] = True
+
+    return final_rules
 
 
 class RePlanPipeline:
@@ -406,16 +428,27 @@ class RePlanPipeline:
 
         return image_with_bbox
 
-    def _get_components_for_rules(self, bbox_data, delete_main_prompt, has_image_prompt):
+    def _get_components_for_rules(self, bbox_data, delete_main_prompt, has_image_prompt, do_split=True):
+        # We need expanded components for logging if using expanded rules
         num_regions = len(bbox_data) if bbox_data else 0
-        components = []
+        
+        logical_components = []
         if not delete_main_prompt:
-            components.append('Main Prompt')
+            logical_components.append('Main Prompt')
         if has_image_prompt:
-            components.append('Image Prompt')
-        components.extend([f'Hint {i+1}' for i in range(num_regions)])
-        components.extend([f'BBox {i+1}' for i in range(num_regions)])
-        components.append('Background')
+            logical_components.append('Image Prompt')
+        
+        logical_components.extend([f'Hint {i+1}' for i in range(num_regions)])
+        logical_components.extend([f'BBox {i+1}' for i in range(num_regions)])
+        logical_components.append('Background')
+        
+        if not do_split:
+            return logical_components
+
+        # Expand
+        components = []
+        for c in logical_components:
+            components.extend(expand_key_to_split(c))
         return components
 
     def region_edit_with_attention(
@@ -429,6 +462,7 @@ class RePlanPipeline:
         expand_value=0.15,
         expand_mode='ratio',
         attention_rules=None,
+        attention_switch_step=0.0,
         visualize_attention=False,
         symmetric_masking=False,
         output_dir=None,
@@ -455,6 +489,8 @@ class RePlanPipeline:
         width, height = image_size
 
         pipeline_kwargs = pipeline_kwargs or {}
+        num_inference_steps = pipeline_kwargs.get("num_inference_steps", 28 if self.pipeline_type == "flux" else 50)
+        pipeline_kwargs["num_inference_steps"] = num_inference_steps # Ensure it's set
 
         # Set output directory
         edit_folder = None
@@ -473,15 +509,50 @@ class RePlanPipeline:
         response_text = response[0] if isinstance(response, list) else response
         bbox_data = self.extract_bbox_from_response(response_text)
 
-        # Auto-generate attention rules
+        # Determine switch step
+        if attention_switch_step <= 1.0:
+            switch_at = int(attention_switch_step * num_inference_steps)
+        else:
+            switch_at = int(attention_switch_step)
+        
+        switch_at = max(0, min(switch_at, num_inference_steps))
+        
+        # Auto-generate attention rules with switch logic
         if attention_rules is None and bbox_data:
-            attention_rules = generate_default_attention_rules(
+            # Generate two sets of rules
+            # Rule A: Before switch (Noise BG !-> Noise BBox, Split=True)
+            rules_before = generate_default_attention_rules(
                 bbox_data, 
                 delete_main_prompt, 
                 bboxes_attend_to_each_other, 
-                symmetric_masking=False,
-                has_image_prompt=(self.pipeline_type == "qwen")
+                symmetric_masking=symmetric_masking,
+                has_image_prompt=(self.pipeline_type == "qwen"),
+                noise_bg_attend_noise_bbox=False,
+                do_split=True
             )
+            # Rule B: After switch (Default, Split=False)
+            rules_after = generate_default_attention_rules(
+                bbox_data, 
+                delete_main_prompt, 
+                bboxes_attend_to_each_other, 
+                symmetric_masking=symmetric_masking,
+                has_image_prompt=(self.pipeline_type == "qwen"),
+                noise_bg_attend_noise_bbox=True,
+                do_split=False
+            )
+            
+            
+            if switch_at == 0:
+                attention_rules = rules_after
+            else:
+                step_attention_dict = {}
+                for step in range(num_inference_steps):
+                    if step < switch_at:
+                        step_attention_dict[step] = rules_before
+                    else:
+                        step_attention_dict[step] = rules_after
+                
+                attention_rules = step_attention_dict
 
         if not only_save_image and not skip_save:
             info_path = os.path.join(edit_folder, "config.json")
@@ -495,6 +566,7 @@ class RePlanPipeline:
                 "expand_mode": expand_mode,
                 "enable_flex_attn": enable_flex_attn,
                 "flex_attn_use_bitmask": flex_attn_use_bitmask,
+                "attention_switch_step": attention_switch_step,
             }
             with open(info_path, 'w', encoding='utf-8') as f:
                 json.dump(config_info, f, ensure_ascii=False, indent=2, sort_keys=True)
@@ -508,28 +580,57 @@ class RePlanPipeline:
 
                 if attention_rules:
                     f.write("--- Attention Rules ---\n")
+                    
+                    # Check if rules are split or not based on first rule entry
+                    # If step-based, check step 0
+                    is_step_based = isinstance(attention_rules, dict) and any(isinstance(k, int) for k in attention_rules.keys())
+                    
+                    sample_rule = attention_rules[0] if is_step_based else attention_rules
+                    # Simple heuristic: if any key contains "Noise" or "Image ", it's likely split
+                    is_split = any("Noise" in k[0] or "Image BBox" in k[0] or "Image Background" in k[0] for k in sample_rule.keys())
+
                     components = self._get_components_for_rules(
-                        bbox_data, delete_main_prompt, has_image_prompt=(self.pipeline_type == "qwen")
+                        bbox_data, 
+                        delete_main_prompt, 
+                        has_image_prompt=(self.pipeline_type == "qwen"),
+                        do_split=is_split
                     )
 
                     col_width = 15
                     header = f"{' ':<{col_width}}" + "".join(
-                        [f"{comp:<{col_width}}" for comp in components]
+                        [f"{comp[:col_width-1]:<{col_width}}" for comp in components]
                     )
                     
-                    is_step_based = isinstance(attention_rules, dict) and any(isinstance(k, int) for k in attention_rules.keys())
-
                     if is_step_based:
-                        f.write("Step-based attention rules provided:\n")
+                        f.write(f"Step-based attention rules provided (Switch step: {attention_switch_step}).\n")
                         sorted_steps = sorted([k for k in attention_rules.keys() if isinstance(k, int)])
-                        for step in sorted_steps:
+                        
+                        # Only show step 0 and switch step (if different) to avoid huge log
+                        steps_to_show = [0]
+                        if switch_at > 0 and switch_at < num_inference_steps:
+                             steps_to_show.append(switch_at)
+                             
+                        for step in steps_to_show:
                             rules = attention_rules[step]
+                            
+                            # Check if THIS step is split (might differ between step 0 and switch step)
+                            step_is_split = any("Noise" in k[0] or "Image BBox" in k[0] or "Image Background" in k[0] for k in rules.keys())
+                            step_comps = self._get_components_for_rules(
+                                bbox_data, 
+                                delete_main_prompt, 
+                                has_image_prompt=(self.pipeline_type == "qwen"),
+                                do_split=step_is_split
+                            )
+                            step_header = f"{' ':<{col_width}}" + "".join(
+                                [f"{comp[:col_width-1]:<{col_width}}" for comp in step_comps]
+                            )
+
                             f.write(f"\n[Step {step}]\n")
-                            f.write(header + "\n")
-                            f.write("-" * len(header) + "\n")
-                            for q_comp in components:
-                                row_str = f"{q_comp:<{col_width}}"
-                                for k_comp in components:
+                            f.write(step_header + "\n")
+                            f.write("-" * len(step_header) + "\n")
+                            for q_comp in step_comps:
+                                row_str = f"{q_comp[:col_width-1]:<{col_width}}"
+                                for k_comp in step_comps:
                                     state = "✅" if rules.get((q_comp, k_comp)) else "❌"
                                     row_str += f"{state:<{col_width}}"
                                 f.write(row_str + "\n")
@@ -538,7 +639,7 @@ class RePlanPipeline:
                         f.write("-" * len(header) + "\n")
 
                         for q_comp in components:
-                            row_str = f"{q_comp:<{col_width}}"
+                            row_str = f"{q_comp[:col_width-1]:<{col_width}}"
                             for k_comp in components:
                                 state = "✅" if attention_rules.get((q_comp, k_comp)) else "❌"
                                 row_str += f"{state:<{col_width}}"
@@ -613,13 +714,13 @@ class RePlanPipeline:
             pipe_kwargs["guidance_scale"] = pipeline_kwargs.get("guidance_scale", 2.5)
             pipe_kwargs["height"] = pipeline_kwargs.get("height", height)
             pipe_kwargs["width"] = pipeline_kwargs.get("width", width)
-            pipe_kwargs["num_inference_steps"] = pipeline_kwargs.get("num_inference_steps", 28)
+            pipe_kwargs["num_inference_steps"] = num_inference_steps
             
         elif self.pipeline_type == "qwen":
             pipe_kwargs["negative_prompt"] = pipeline_kwargs.get("negative_prompt", " ")
             pipe_kwargs["generator"] = torch.manual_seed(0)
             pipe_kwargs["true_cfg_scale"] = pipeline_kwargs.get("true_cfg_scale", 4.0)
-            pipe_kwargs["num_inference_steps"] = pipeline_kwargs.get("num_inference_steps", 50)
+            pipe_kwargs["num_inference_steps"] = num_inference_steps
 
         # Pass callback parameters if present
         if "callback_on_step_end" in pipeline_kwargs:
@@ -687,6 +788,7 @@ class RePlanPipeline:
         expand_value=0.15,
         expand_mode='ratio',
         attention_rules=None,
+        attention_switch_step=0.0,
         bboxes_attend_to_each_other=True,
         symmetric_masking=False,
         output_dir=None,
@@ -728,6 +830,7 @@ class RePlanPipeline:
             expand_value=expand_value,
             expand_mode=expand_mode,
             attention_rules=attention_rules,
+            attention_switch_step=attention_switch_step,
             symmetric_masking=symmetric_masking,
             output_dir=final_output_dir,
             bboxes_attend_to_each_other=bboxes_attend_to_each_other,
@@ -797,5 +900,3 @@ class RePlanPipeline:
             json.dump(results_list, f, ensure_ascii=False, indent=2, sort_keys=True)
 
         return results_list
-
-
