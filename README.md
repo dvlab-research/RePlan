@@ -33,6 +33,12 @@
 
 </div>
 
+## 🔥 News
+
+- [Dec 26th, 2025] We updated the gradio demo for custom attention control and optimized inference settings when using Qwen-Image-Edit as backbone.
+- [Dec 19th, 2025] We released paper, model and data of RePlan!
+
+
 ## 📑 Table of Contents
 
 - [📖 Overview](#overview)
@@ -172,19 +178,18 @@ python replan/inference/app.py --server_port 8080 --pipeline_type "qwen"
 
 <div align="center">
 <img src="assets/demo_setting.png" alt="setting" style="max-width:60%; border-radius:10px;"/>
-<p><em>Example of advanced control panel</em></p>
+<p><em>Example of advanced control panel. "Main": global prompt. "Hi": Hint i. "N.Bi": Noise of bbox i. "I.Bi": Image of bbox i. "N.BG": Noise of background. "I.BG": Image of background.</em></p>
 </div>
 
-1. **Interactive Attention Matrix**:
-Defines the fine-grained attention mask between specific components to control information flow. **Noise/Image** components distinguish the **Latent Noise Patches** from **Input Image Patches**. 
+1. **Interactive Attention Matrix**: Defines the fine-grained attention mask between specific components to control information flow. **Noise/Image** components distinguish the **Latent Noise Patches** from **Input Image Patches**.
 
-2. **Rule Switch Ratio**:
-Determines the phase transition point (`0.0` - `1.0`) from **Custom Rules** (defined in 1) to **Default Rules**. The cutoff step is calculated as $\lfloor \text{Ratio} \times \text{Total Steps} \rfloor$ (e.g., Ratio `0.7` with `50` steps $\rightarrow$ Custom Rules apply for steps **0–35**).
+2. **Rule Switch Ratio**: Determines the phase transition point (`0.0` - `1.0`) from **Custom Rules** (defined in 1) to **Default Rules** (depicted in the paper). The cutoff step is calculated as  (e.g., Ratio `0.7` with `50` steps → Custom Rules apply for steps **0–35**).
+
+3. **Locality Control Strategy**: Predefined custom rule of the demo disables **Noise Background → Noise BBox** attention to isolate background from edit target. The **Rule Switch Ratio** controls the duration (number of steps) of this isolation:
     * **Higher Ratio:** Enforces stronger locality. Increase to fix **semantic spillover** (edits leaking into the background).
     * **Lower Ratio:** Allows more global interaction. Decrease to fix **boundary artifacts** (unnatural, sharp edges).
 
-3. **Expand Value**:
-Expands the effective attention mask relative to the bounding box size (e.g., `0.15` adds 15% padding).
+4. **Expand Value**: Expands the effective attention mask relative to the bounding box size (e.g., `0.15` to expand 15% of bbox size).
 
 ---
 

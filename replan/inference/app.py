@@ -573,7 +573,7 @@ const EXAMPLES = [
     { src: "./custom_assets/cup.png", text: "Replace the glass that has been used and left on the desk with a small potted plant" },
     { src: "./custom_assets/crowd.png", text: "Find the woman with light blue backpack and change the color of her shoes to red" },
     { src: "./custom_assets/festival.png", text: "The sun has now set, and someone has decorated the large bush on the right with colorful fairy lights for the evening's festivities." },
-    { src: "./custom_assets/cream.png", text: "Replace the spread on the left cracker with peanut butter and the spread on the right cracker with avocado cream." },
+    { src: "./custom_assets/cream.png", text: "Replace the spread on the left cracker with peanut butter and the spread on the upper cracker with avocado cream." },
     { src: "./custom_assets/keyboard.png", text: "Change the color of the keyboard with yellow sticky notes to black." },
     { src: "./custom_assets/sunglasses.png", text: "Remove the sunglasses from the person sitting on the left." },
     { src: "./custom_assets/snowman.png", text: "Replace the individual whose attire suggests a greater emphasis on thermal insulation for cold weather with a snowman." },
