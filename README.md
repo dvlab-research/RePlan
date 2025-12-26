@@ -177,7 +177,7 @@ python replan/inference/app.py --server_port 8080 --pipeline_type "qwen"
 #### Advanced Controls
 
 <div align="center">
-<img src="assets/demo_setting.png" alt="setting" style="max-width:60%; border-radius:10px;"/>
+<img src="assets/demo_setting.png" alt="setting" style="max-width:30%; border-radius:10px;"/>
 <p><em>Example of advanced control panel. "Main": global prompt. "Hi": Hint i. "N.Bi": Noise of bbox i. "I.Bi": Image of bbox i. "N.BG": Noise of background. "I.BG": Image of background.</em></p>
 </div>
 
